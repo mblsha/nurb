@@ -2,8 +2,10 @@
 
 import argparse
 import asyncio
+import contextlib
 import errno
 import importlib.metadata
+import json
 import pathlib
 import sys
 
@@ -32,6 +34,38 @@ CARD_TEMPLATE = """# {name}
 
 ## Changelog
 """
+
+REFERENCE_PART_TEMPLATE = '''from nurb import *
+
+
+@part
+def {name}(width={width}, depth={depth}, height={height}, draft=False):
+    return Pos({center_x}, {center_y}, {center_z}) * Box(width, depth, height)
+'''
+
+REFERENCE_CARD_TEMPLATE = """# {name}
+
+```toml
+reconstruction = "bounding_box_draft"
+{target}
+```
+
+## What it is
+
+Parametric reconstruction of `{source}`.
+
+## Design notes
+
+## Don't
+
+## Changelog
+"""
+
+
+def _float_default(value):
+    """A compact Python float literal, including `.0` for integral dimensions."""
+    text = f"{float(value):.9g}"
+    return text if any(mark in text.lower() for mark in (".", "e")) else text + ".0"
 
 
 def project_root(start=None):
@@ -132,18 +166,91 @@ def cmd_new(args):
         if getattr(args, "root", None)
         else project_root()
     )
+    reference = getattr(args, "reference", None)
+    reference_data = None
+    if reference:
+        import shutil
+
+        from . import compare, scan
+
+        source = pathlib.Path(reference).resolve()
+        try:
+            mesh, unit, unit_source = scan.load(source, units=args.units)
+        except (ValueError, OSError) as exc:
+            sys.exit(f"  {exc}")
+        if unit_source == "guess":
+            size = " x ".join(f"{v:.4g}" for v in mesh.extents)
+            sys.exit(
+                f"  {source.name} has no declared units. It would measure {size} mm as {unit}. "
+                f"Confirm the file's units with --units mm, cm, m, or in"
+            )
+        try:
+            target = compare.setting(
+                {
+                    "target": {
+                        "file": f"scans/{source.name}",
+                        "units": unit,
+                        "tolerance_mm": args.tolerance if args.tolerance is not None else compare.DEFAULT_TOLERANCE_MM,
+                        "transform": compare.IDENTITY,
+                    }
+                }
+            )
+        except ValueError as exc:
+            sys.exit(f"  {exc}")
+        reference_data = (source, mesh, target, shutil)
+    elif getattr(args, "units", None) or getattr(args, "tolerance", None) is not None:
+        sys.exit("  --units and --tolerance are only used with --from")
+
     parts = root / "parts"
     # The first part is the project's birth, the only moment the launcher appears
     # on its own. Deleting it is a decision, so it is never written back over one.
     born = not parts.is_dir()
-    parts.mkdir(parents=True, exist_ok=True)
     name = args.name.replace("-", "_")
     py, md = parts / f"{name}.py", parts / f"{name}.md"
     if py.exists():
         sys.exit(f"{py} already exists")
-    py.write_text(PART_TEMPLATE.format(name=name))
-    md.write_text(CARD_TEMPLATE.format(name=name))
+    if reference_data:
+        source, mesh, target, _ = reference_data
+        destination = root / target["file"]
+        if destination.exists() and destination.resolve() != source:
+            sys.exit(f"  {destination} already exists; rename the reference or choose another project")
+    parts.mkdir(parents=True, exist_ok=True)
+    if reference_data:
+        source, mesh, target, shutil = reference_data
+        destination = root / target["file"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.resolve() != source:
+            shutil.copy2(source, destination)
+        center = mesh.bounds.mean(axis=0)
+        # A sheet or open scan can have no span on one axis. The reference keeps its
+        # measured zero extent, while the editable placeholder needs a real solid.
+        size = [max(float(value), 0.1) for value in mesh.extents]
+        py.write_text(
+            REFERENCE_PART_TEMPLATE.format(
+                name=name,
+                width=_float_default(size[0]),
+                depth=_float_default(size[1]),
+                height=_float_default(size[2]),
+                center_x=_float_default(center[0]),
+                center_y=_float_default(center[1]),
+                center_z=_float_default(center[2]),
+            )
+        )
+        from . import compare
+
+        md.write_text(
+            REFERENCE_CARD_TEMPLATE.format(
+                name=name,
+                target=compare._format_setting(target),
+                source=source.name,
+            )
+        )
+    else:
+        py.write_text(PART_TEMPLATE.format(name=name))
+        md.write_text(CARD_TEMPLATE.format(name=name))
     written = [py, md]
+    if reference_data:
+        written.append(root / reference_data[2]["file"])
     if born:
         written.append(_write_launcher(root))
     seeded, already = _seed_agents(root, getattr(args, "embed", False))
@@ -750,17 +857,27 @@ def cmd_scan(args):
         mesh, unit, source = scan.load(args.file, units=args.units)
     except ValueError as exc:
         sys.exit(f"  {exc}")
-    for line in scan.report(args.file, mesh, unit, source):
-        print(line)
-    if not args.section:
-        return
+    cuts = []
     try:
-        cut = scan.section(mesh, args.section, tolerance=args.tolerance)
+        for spec in args.section or []:
+            cuts.append(scan.section(mesh, spec, tolerance=args.tolerance))
     except ValueError as exc:
         sys.exit(f"  {exc}")
-    print()
-    for line in scan.section_report(cut):
+    if args.json:
+        print(
+            json.dumps(
+                scan.structured(args.file, mesh, unit, source, cuts),
+                indent=2,
+                allow_nan=False,
+            )
+        )
+        return
+    for line in scan.report(args.file, mesh, unit, source):
         print(line)
+    for cut in cuts:
+        print()
+        for line in scan.section_report(cut):
+            print(line)
 
 
 def cmd_compare(args):
@@ -773,46 +890,227 @@ def cmd_compare(args):
 
     root = project_root()
     named = args.part is not None
+    output = []
+    skipped = []
     for path in _resolve(root, args.part):
         try:
             declared = compare.setting(checks.settings(path))
         except ValueError as exc:
+            if args.json:
+                skipped.append({"part": path.stem, "reason": str(exc)})
+                continue
             sys.exit(f"  {exc}")
+        same_reference = bool(
+            args.against
+            and declared
+            and _reference_path(root, args.against) == _reference_path(root, declared["file"])
+        )
+        inherited = declared if declared and (not args.against or same_reference) else None
         if args.against:
-            file, units = args.against, args.units
+            file = args.against
         elif declared:
-            file, units = declared[0], args.units or declared[1]
+            file = declared["file"]
         else:
-            if named:
+            if named and not args.json:
                 sys.exit(
                     f"  {path.stem} has no target mesh. Name one in the card's ```toml"
                     f" settings block:\n      target = \"scans/original.stl\"\n"
                     f"  or ask directly: nurb compare {path.stem} --against <file>"
                 )
-            print(f"  {path.stem}: no target in its card")
+            if args.json:
+                skipped.append(
+                    {
+                        "part": path.stem,
+                        "reason": "no target in its card",
+                    }
+                )
+            else:
+                print(f"  {path.stem}: no target in its card")
             continue
+        units = args.units if args.units is not None else inherited["units"] if inherited else None
+        tolerance_mm = args.tolerance if args.tolerance is not None else inherited["tolerance_mm"] if inherited else compare.DEFAULT_TOLERANCE_MM
+        requested_alignment = args.alignment
+        if requested_alignment is None:
+            alignment = "stored" if inherited and inherited["transform"] is not None else "center"
+        else:
+            alignment = requested_alignment
+        if alignment == "stored":
+            if not inherited or inherited["transform"] is None:
+                reason = "stored alignment needs this same reference to have target.transform in the card; use --alignment center or --alignment identity"
+                if args.json:
+                    skipped.append({"part": path.stem, "reason": reason})
+                    continue
+                sys.exit(f"  {reason}")
+            transform = inherited["transform"]
+        elif alignment == "identity":
+            transform = compare.IDENTITY
+        else:
+            transform = None
+        if args.save_alignment and not inherited:
+            reason = "--save-alignment only updates the card's declared reference; --against must name that same file"
+            if args.json:
+                skipped.append({"part": path.stem, "reason": reason})
+                continue
+            sys.exit(f"  {reason}")
         try:
             mesh, unit, source = compare.load(root, file, units=units)
         except ValueError as exc:
+            if args.json:
+                skipped.append({"part": path.stem, "reason": str(exc)})
+                continue
             sys.exit(f"  {exc}")
         except Exception as exc:
             # Mesh libraries can still fail after parsing; the command's surface is a
             # one-line diagnosis, never an implementation traceback.
-            sys.exit(f"  {path.stem}: {type(exc).__name__}: {exc}")
-        for name, overrides, _ in _configs(path):
+            reason = f"{type(exc).__name__}: {exc}"
+            if args.json:
+                skipped.append({"part": path.stem, "reason": reason})
+                continue
+            sys.exit(f"  {path.stem}: {reason}")
+        saved = False
+        if args.json:
             try:
-                shape, _, _ = builder.build(
-                    path, overrides=overrides or None, draft=False
+                configs = checks.configurations(path)
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "part": path.stem,
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    }
                 )
-                metrics = compare.against(shape, mesh)
+                continue
+        else:
+            configs = _configs(path)
+        for name, overrides, _ in configs:
+            applied_alignment = "stored" if saved else alignment
+            try:
+                stdout = (
+                    contextlib.redirect_stdout(sys.stderr)
+                    if args.json
+                    else contextlib.nullcontext()
+                )
+                with stdout:
+                    shape, _, _ = builder.build(
+                        path, overrides=overrides or None, draft=False
+                    )
+                    metrics = compare.against(
+                        shape,
+                        mesh,
+                        tolerance_mm=tolerance_mm,
+                        transform=transform,
+                    )
+                metrics["alignment"] = applied_alignment
             except (ValueError, builder.BuildError) as exc:
+                if args.json:
+                    skipped.append(
+                        {
+                            "part": path.stem,
+                            "configuration": name,
+                            "reason": str(exc),
+                        }
+                    )
+                    if args.save_alignment and not saved:
+                        break
+                    continue
                 sys.exit(f"  {exc}")
             except Exception as exc:
                 # A part can reject its own defaults, and the mesh libraries have their
                 # own ideas about failure. Neither is worth a traceback.
-                sys.exit(f"  {name}: {type(exc).__name__}: {exc}")
-            for line in compare.report(name, file, metrics, unit, source):
-                print(line)
+                reason = f"{type(exc).__name__}: {exc}"
+                if args.json:
+                    skipped.append(
+                        {
+                            "part": path.stem,
+                            "configuration": name,
+                            "reason": reason,
+                        }
+                    )
+                    if args.save_alignment and not saved:
+                        break
+                    continue
+                sys.exit(f"  {name}: {reason}")
+            just_saved = args.save_alignment and not saved
+            if just_saved:
+                changes = {"transform": metrics["transform"]}
+                if args.units is not None:
+                    changes["units"] = unit
+                compare.update_card(path, **changes)
+                saved = True
+                transform = metrics["transform"]
+            identity = _reference_identity(root, file)
+            result = {
+                "name": name,
+                "part": path.stem,
+                "reference": {
+                    "file": str(file),
+                    "identity": identity,
+                    "declared_file": declared["file"] if declared else None,
+                    "matches_declared_reference": same_reference or not args.against,
+                    "units": unit,
+                    "unit_source": source,
+                },
+                "tolerance_mm": metrics["tolerance_mm"],
+                "alignment": {
+                    "mode": applied_alignment,
+                    "transform": metrics["transform"],
+                    "offset_mm": metrics["offset"],
+                    "frame": metrics["transform_frame"],
+                    "persisted": bool(applied_alignment == "stored" or just_saved),
+                    "saved_by_this_run": bool(just_saved),
+                },
+                "sample_counts": metrics["sample_count"],
+                "directions": {
+                    "part_to_target": _structured_direction(metrics["part"]),
+                    "target_to_part": _structured_direction(metrics["target"]),
+                },
+                "detected_above_tolerance": metrics["detected_above_tolerance"],
+                "worst_regions": metrics["worst_regions"],
+            }
+            output.append(result)
+            if not args.json:
+                for line in compare.report(name, file, metrics, unit, source):
+                    print(line)
+                if just_saved:
+                    print(f"      stored this transform in {path.with_suffix('.md').name}")
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "comparisons": output,
+                    "skipped": skipped,
+                },
+                indent=2,
+                allow_nan=False,
+            )
+        )
+
+
+def _structured_direction(stats):
+    """Name sampled comparison facts explicitly in the machine-readable contract."""
+    return {
+        "estimated_sampled_coverage": stats["within_tolerance"],
+        "sampled_max": stats["sampled_max"],
+        "sampled_median": stats["median"],
+        "sampled_p95": stats["p95"],
+        "sampled_excess_max": stats["excess_max"],
+        "sampled_excess_p95": stats["excess_p95"],
+    }
+
+
+def _reference_path(root, file):
+    path = pathlib.Path(file)
+    return (path if path.is_absolute() else root / path).resolve()
+
+
+def _reference_identity(root, file):
+    path = _reference_path(root, file)
+    stat = path.stat()
+    return {
+        "resolved_path": str(path),
+        "size_bytes": stat.st_size,
+        "modified_ns": stat.st_mtime_ns,
+    }
 
 
 def skill_targets():
@@ -1316,6 +1614,9 @@ def main(argv=None):
     s = sub.add_parser("new", help="create a part")
     s.add_argument("name")
     s.add_argument("--root", help=argparse.SUPPRESS)
+    s.add_argument("--from", dest="reference", metavar="MESH", help="start a reconstruction from this STL, OBJ, GLB, or triangulated PLY reference")
+    s.add_argument("--units", choices=("mm", "cm", "m", "in"), help="the reference file's confirmed units")
+    s.add_argument("--tolerance", type=float, help="acceptable surface deviation in mm (default 0.1)")
     s.add_argument(
         "--embed",
         action="store_true",
@@ -1372,13 +1673,15 @@ def main(argv=None):
     )
     s.add_argument(
         "--section",
+        action="append",
         metavar="AXIS[:POS]",
-        help="slice a profile polyline: z is mid-mesh, z:0.7 a fraction of the span, z:40mm a coordinate in the mesh's own frame",
+        help="slice a complete profile polyline; repeat for batch cuts. z is mid-mesh, z:0.7 a span fraction, z:40mm a source-frame coordinate",
     )
     s.add_argument(
         "--tolerance", type=float, default=0.2,
         help="simplify the profile to this many mm (default 0.2)",
     )
+    s.add_argument("--json", action="store_true", help="write complete bounds, fits, and untruncated sections")
     s.set_defaults(fn=cmd_scan)
 
     s = sub.add_parser(
@@ -1395,6 +1698,22 @@ def main(argv=None):
         choices=("mm", "cm", "m", "in"),
         help="the mesh file's units. default: the card's say, the format's, or a size guess",
     )
+    s.add_argument(
+        "--tolerance",
+        type=float,
+        help="acceptable surface deviation in mm (default: card, otherwise 0.1)",
+    )
+    s.add_argument(
+        "--alignment",
+        choices=("stored", "identity", "center"),
+        help="target-to-part alignment: card transform, unchanged coordinates, or bounding-box centers",
+    )
+    s.add_argument(
+        "--save-alignment",
+        action="store_true",
+        help="store the applied transform for the card's declared reference",
+    )
+    s.add_argument("--json", action="store_true", help="write complete structured comparison evidence")
     s.set_defaults(fn=cmd_compare)
 
     s = sub.add_parser("skill", help="print an agent skill file for your AI harness")

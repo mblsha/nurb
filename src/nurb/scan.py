@@ -6,12 +6,7 @@ downloaded off a model site. This module reads either the same way, because they
 the same question at this stage: overall size in mm with the file's units made
 explicit, and a cross-section sliced into a polyline short enough to sketch against.
 
-Where they differ is what the numbers are worth, and that is not visible in the
-geometry. A phone scan is reference geometry and its fits stay provisional until a
-coupon proves them; a download is exact to the micron. Nothing in the mesh says which
-one it is, so this module never guesses. The 3DBenchy, a designed model, scores like a
-capture on every statistic worth computing. Provenance is something the user said and
-the agent knows, so the judgement lives in the skill, and this reports facts.
+Where they differ is what the numbers are worth, and that is not visible in the geometry. A phone scan is reference geometry and its fits stay provisional until a coupon proves them. A downloaded design can carry precise triangle coordinates while still approximating its original curves with flat polygons. Nothing in the mesh says which one it is, so this module never guesses. The 3DBenchy, a designed model, scores like a capture on every statistic worth computing. Provenance is something the user said and the agent knows, so the judgement lives in the skill, and this reports facts.
 
 The units question is the dangerous one. Scan apps export metres and slicers export
 millimetres, and a mesh 0.3 units across does not say which it is. Guessing wrong is a
@@ -111,6 +106,7 @@ def report(path, mesh, unit, source):
     # line that rounds that to 0.0 states a falsehood right where units go wrong.
     size = " x ".join(f"{v:.4g}" for v in mesh.extents)
     surface = "watertight" if mesh.is_watertight else "open surface"
+    low, high = mesh.bounds
     lines = [f"  {path.name}  {len(mesh.faces):,} triangles, {surface}, {size} mm"]
     if source == "guess":
         span = float(mesh.extents.max()) / UNITS[unit]
@@ -126,8 +122,46 @@ def report(path, mesh, unit, source):
         lines.append(f"      read as {LONG[unit]} (declared by the file format)")
     else:
         lines.append(f"      read as {LONG[unit]} (--units)")
-    lines.append(f"      {_solid_line(path, mesh, unit, source)}")
+    lines.append(f"      reconstruction bounds: x {low[0]:.6g} to {high[0]:.6g}, y {low[1]:.6g} to {high[1]:.6g}, z {low[2]:.6g} to {high[2]:.6g} mm; center {tuple(float(v) for v in mesh.bounds.mean(axis=0))}")
+    lines.append("      comparison reference: usable with nurb compare even when solid conversion is unavailable")
+    lines.append(f"      optional faceted solid: {_solid_line(path, mesh, unit, source)}")
     return lines
+
+
+def structured(path, mesh, unit, source, sections=()):
+    """Complete machine-readable measurements in the mesh's millimetre frame."""
+    path = pathlib.Path(path)
+    low, high = mesh.bounds
+    return {
+        "schema_version": 1,
+        "file": str(path.resolve()),
+        "units": {
+            "input": unit,
+            "source": source,
+            "scale_to_mm": UNITS[unit],
+        },
+        "mesh": {
+            "triangles": int(len(mesh.faces)),
+            "watertight": bool(mesh.is_watertight),
+            "surface_area_mm2": float(mesh.area),
+            "volume_mm3": float(abs(mesh.volume)) if mesh.is_watertight else None,
+            "coordinate_frame": "source mesh coordinates scaled to millimetres",
+            "origin_mm": [0.0, 0.0, 0.0],
+            "bounds_mm": {
+                "min": [float(v) for v in low],
+                "max": [float(v) for v in high],
+            },
+            "center_mm": [float(v) for v in mesh.bounds.mean(axis=0)],
+            "extents_mm": [float(v) for v in mesh.extents],
+            "largest_planar_region_fit": _largest_planar_region_fit(mesh),
+        },
+        "comparison_reference": {
+            "usable": True,
+            "note": "The mesh remains a comparison reference whether or not it converts to a solid.",
+        },
+        "solid_conversion": _solid_facts(path, mesh, unit, source),
+        "sections": [_section_structured(cut) for cut in sections],
+    }
 
 
 def _solid_line(path, mesh, unit, source):
@@ -166,14 +200,39 @@ def _solid_line(path, mesh, unit, source):
     )
 
 
+def _solid_facts(path, mesh, unit, source):
+    from . import mesh as mesh_module
+
+    problem = mesh_module.refusal(path.suffix, mesh)
+    if problem:
+        return {"available": False, "reason": problem, "representation": None}
+    solid, problem = mesh_module.conversion(path)
+    if problem:
+        return {"available": False, "reason": problem, "representation": None}
+    return {
+        "available": True,
+        "reason": None,
+        "representation": "faceted",
+        "flat_face_count": len(solid.faces()),
+        "warning": "Curves remain triangle-derived facets; reconstruct analytic geometry for editable CAD.",
+    }
+
+
 def section(mesh, spec, tolerance=0.2):
     """A cross-section as polylines an agent can sketch against, longest first.
 
     Returns axis and position of the cut, the names of the two in-plane axes the
-    points are reported in, the profiles as (points, closed, length) dicts, and how
-    many sub-fragment chains were dropped at what floor.
+    points are reported in, every profile as a measured dict, and how many short
+    chains are marked as probable scan noise for the concise text report.
     """
     import trimesh
+
+    try:
+        tolerance = float(tolerance)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("section tolerance must be a finite number at least 0 mm") from exc
+    if not np.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("section tolerance must be a finite number at least 0 mm")
 
     if not CUT.match(spec or ""):
         raise ValueError(
@@ -197,9 +256,9 @@ def section(mesh, spec, tolerance=0.2):
     floor = _length(chains[0]) * FRAGMENT if chains else 0.0
     profiles, skipped = [], 0
     for chain in chains:
-        if _length(chain) < floor:
+        noise_candidate = _length(chain) < floor
+        if noise_candidate:
             skipped += 1
-            continue
         closed = len(chain) > 3 and _key(chain[0]) == _key(chain[-1])
         profiles.append(
             {
@@ -207,6 +266,8 @@ def section(mesh, spec, tolerance=0.2):
                 "raw": len(chain),
                 "closed": closed,
                 "length": _length(chain),
+                "fits": _profile_fits(chain, closed=closed),
+                "noise_candidate": noise_candidate,
             }
         )
     return {
@@ -217,7 +278,143 @@ def section(mesh, spec, tolerance=0.2):
         "skipped": skipped,
         "floor": floor,
         "tolerance": tolerance,
+        "origin": [float(v) for v in origin],
+        "normal": [float(v) for v in normal],
     }
+
+
+def _section_structured(cut):
+    loops = []
+    for profile in cut["profiles"]:
+        points = np.asarray(profile["points"])
+        loop = {
+            "closed": bool(profile["closed"]),
+            "noise_candidate": bool(profile["noise_candidate"]),
+            "length_mm": float(profile["length"]),
+            "raw_point_count": int(profile["raw"]),
+            "simplified_point_count": int(len(points)),
+            "bounds_mm": {
+                "min": [float(v) for v in points.min(axis=0)],
+                "max": [float(v) for v in points.max(axis=0)],
+            },
+            "points_mm": [[float(value) for value in point] for point in points],
+            "fits": profile["fits"],
+        }
+        circle = profile["fits"].get("circle")
+        if (
+            profile["closed"]
+            and circle
+            and circle["angular_coverage_degrees"] >= 300.0
+            and circle["relative_rms_residual"] is not None
+            and circle["relative_rms_residual"] <= 0.05
+        ):
+            axis_point = [0.0, 0.0, 0.0]
+            axis_point["xyz".index(cut["axis"])] = float(cut["pos"])
+            for coordinate, axis_name in zip(circle["center_mm"], cut["plane"]):
+                axis_point["xyz".index(axis_name)] = float(coordinate)
+            loop["cylinder_candidate"] = {
+                "axis_point_mm": axis_point,
+                "axis_direction": list(cut["normal"]),
+                "radius_mm": circle["radius_mm"],
+                "rms_residual_mm": circle["rms_residual_mm"],
+                "max_residual_mm": circle["max_residual_mm"],
+                "sample_count": circle["sample_count"],
+                "evidence": "single cross-section circle fit",
+            }
+        loops.append(loop)
+    return {
+        "axis": cut["axis"],
+        "position_mm": float(cut["pos"]),
+        "plane_axes": list(cut["plane"]),
+        "origin_mm": list(cut["origin"]),
+        "normal": list(cut["normal"]),
+        "simplification": {
+            "algorithm": "Douglas-Peucker",
+            "tolerance_mm": float(cut["tolerance"]),
+            "fragment_floor_mm": float(cut["floor"]),
+            "noise_candidate_count": int(cut["skipped"]),
+        },
+        "loops": loops,
+    }
+
+
+def _largest_planar_region_fit(mesh):
+    """Fit the largest connected coplanar face group, not an arbitrary whole solid."""
+    facets = list(mesh.facets)
+    if not facets:
+        return None
+    areas = np.asarray(mesh.facets_area, dtype=float)
+    faces = np.asarray(facets[int(np.argmax(areas))], dtype=int)
+    vertices = np.unique(np.asarray(mesh.faces)[faces].reshape(-1))
+    fit = _plane_fit(np.asarray(mesh.vertices)[vertices])
+    if fit is not None:
+        fit["area_mm2"] = float(areas.max())
+        fit["face_count"] = int(len(faces))
+    return fit
+
+
+def _plane_fit(points):
+    points = np.unique(np.asarray(points, dtype=float), axis=0)
+    if len(points) < 3:
+        return None
+    center = points.mean(axis=0)
+    _, _, axes = np.linalg.svd(points - center, full_matrices=False)
+    normal = axes[-1]
+    residuals = np.abs((points - center) @ normal)
+    return {
+        "origin_mm": [float(v) for v in center],
+        "normal": [float(v) for v in normal],
+        "rms_residual_mm": float(np.sqrt(np.mean(residuals ** 2))),
+        "max_residual_mm": float(residuals.max()),
+        "sample_count": int(len(points)),
+    }
+
+
+def _profile_fits(points, closed=False):
+    """Return measured line and circle candidates without claiming design intent."""
+    points = np.unique(np.asarray(points, dtype=float), axis=0)
+    if len(points) < 2:
+        return {}
+    center = points.mean(axis=0)
+    _, _, axes = np.linalg.svd(points - center, full_matrices=False)
+    direction = axes[0]
+    normal = np.array([-direction[1], direction[0]])
+    line_residuals = np.abs((points - center) @ normal)
+    fits = {
+        "line": {
+            "point_mm": [float(v) for v in center],
+            "direction": [float(v) for v in direction],
+            "rms_residual_mm": float(np.sqrt(np.mean(line_residuals ** 2))),
+            "max_residual_mm": float(line_residuals.max()),
+            "sample_count": int(len(points)),
+        }
+    }
+    if closed and len(points) >= 3 and np.linalg.matrix_rank(points - center) == 2:
+        a = np.column_stack((2 * points[:, 0], 2 * points[:, 1], np.ones(len(points))))
+        solution, _, _, _ = np.linalg.lstsq(a, np.sum(points ** 2, axis=1), rcond=None)
+        circle_center = solution[:2]
+        radius = float(np.sqrt(max(solution[2] + circle_center @ circle_center, 0.0)))
+        residuals = np.abs(np.linalg.norm(points - circle_center, axis=1) - radius)
+        angles = np.sort(
+            np.mod(
+                np.arctan2(
+                    points[:, 1] - circle_center[1],
+                    points[:, 0] - circle_center[0],
+                ),
+                2 * np.pi,
+            )
+        )
+        gaps = np.diff(np.concatenate((angles, [angles[0] + 2 * np.pi])))
+        fits["circle"] = {
+            "center_mm": [float(v) for v in circle_center],
+            "radius_mm": radius,
+            "rms_residual_mm": float(np.sqrt(np.mean(residuals ** 2))),
+            "max_residual_mm": float(residuals.max()),
+            "sample_count": int(len(points)),
+            "relative_rms_residual": float(np.sqrt(np.mean(residuals ** 2)) / radius) if radius else None,
+            "angular_coverage_degrees": float(np.degrees(2 * np.pi - gaps.max())),
+        }
+    return fits
 
 
 # How many points of one profile get printed. A slice of a noisy scan can survive
@@ -231,10 +428,11 @@ def section_report(cut):
     lines = [
         f"  section {cut['axis']} = {cut['pos']:.2f}mm  points are ({u}, {v}) in mm"
     ]
+    listed = [profile for profile in cut["profiles"] if not profile["noise_candidate"]]
     if not cut["profiles"]:
         lines.append("      the plane misses the mesh")
         return lines
-    for prof in cut["profiles"]:
+    for prof in listed:
         shape = "closed loop" if prof["closed"] else "open"
         points = prof["points"]
         lines.append(
@@ -249,7 +447,7 @@ def section_report(cut):
             )
     if cut["skipped"]:
         lines.append(
-            f"      {cut['skipped']} fragment(s) under {cut['floor']:.1f}mm skipped"
+            f"      {cut['skipped']} noise candidate(s) under {cut['floor']:.1f}mm omitted from this text report; JSON includes them"
         )
     return lines
 

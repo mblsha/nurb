@@ -1,6 +1,7 @@
 """The export route is the configurator's back end: what the sliders hold, polished."""
 
 import asyncio
+import base64
 import io
 import json
 import pathlib
@@ -30,6 +31,266 @@ def project(tmp_path):
     server = Server(tmp_path)
     server.rebuild(part)
     return server
+
+
+class ReplyClient:
+    def __init__(self):
+        self.messages = []
+
+    async def send(self, raw):
+        self.messages.append(json.loads(raw))
+
+
+def valid_stl():
+    return trimesh.creation.box(extents=[4, 5, 6]).export(file_type="stl")
+
+
+def glb_with_external_uri():
+    body = trimesh.creation.box(extents=[4, 5, 6]).export(file_type="glb")
+    old_json_length = int.from_bytes(body[12:16], "little")
+    header = json.loads(body[20 : 20 + old_json_length].decode("utf-8"))
+    header["images"] = [{"uri": "../../outside.png"}]
+    json_body = json.dumps(header, separators=(",", ":")).encode()
+    json_body += b" " * (-len(json_body) % 4)
+    remainder = body[20 + old_json_length :]
+    total = 20 + len(json_body) + len(remainder)
+    return (
+        body[:8]
+        + total.to_bytes(4, "little")
+        + len(json_body).to_bytes(4, "little")
+        + b"JSON"
+        + json_body
+        + remainder
+    )
+
+
+def test_reference_upload_copies_portably_then_updates_the_card(tmp_path):
+    from nurb import checks, compare
+
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    client = ReplyClient()
+    old = tmp_path / "scans" / "old.stl"
+    old.parent.mkdir()
+    old.write_bytes(valid_stl())
+    (tmp_path / "parts" / "thing.md").write_text(
+        "# thing\n\n```toml\ntarget = { file = \"scans/old.stl\", units = \"mm\", tolerance_mm = 0.27, transform = [1, 0, 0, 2, 0, 1, 0, 3, 0, 0, 1, 4, 0, 0, 0, 1] }\n```\n"
+    )
+    body = valid_stl()
+
+    asyncio.run(
+        server.command(
+            json.dumps(
+                {
+                    "type": "target_reference",
+                    "name": "thing",
+                    "filename": "../Phone Scan.stl",
+                    "units": "mm",
+                    "data": base64.b64encode(body).decode(),
+                }
+            ),
+            client,
+        )
+    )
+
+    queued = pathlib.Path(server.queue.get_nowait())
+    assert queued == tmp_path / "parts" / "thing.py"
+    target = compare.setting(checks.settings(queued))
+    relative, units = target["file"], target["units"]
+    assert pathlib.Path(relative).parent == pathlib.Path("scans")
+    assert "Phone_Scan" in relative
+    assert (tmp_path / relative).read_bytes() == body
+    assert units == "mm"
+    assert target["tolerance_mm"] == 0.27
+    assert target["transform"] is None
+    assert client.messages[0]["type"] == "target_reference"
+    assert set(client.messages[0]["written"]) == {"file", "units", "tolerance_mm", "transform"}
+
+
+def test_invalid_reference_upload_preserves_the_existing_card_and_reference(tmp_path):
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    old = scans / "old.stl"
+    old.write_bytes(valid_stl())
+    card = tmp_path / "parts" / "thing.md"
+    card.write_text(
+        "# thing\n\n```toml\ntarget = { file = \"scans/old.stl\", units = \"mm\", tolerance_mm = 0.23 }\n```\n"
+    )
+    before = card.read_bytes()
+    client = ReplyClient()
+
+    asyncio.run(
+        server.command(
+            json.dumps(
+                {
+                    "type": "target_reference",
+                    "name": "thing",
+                    "filename": "broken.stl",
+                    "units": "mm",
+                    "data": base64.b64encode(b"solid empty\nendsolid empty\n").decode(),
+                }
+            ),
+            client,
+        )
+    )
+
+    assert card.read_bytes() == before
+    assert old.is_file()
+    assert sorted(path.name for path in scans.iterdir()) == ["old.stl"]
+    assert server.queue.empty()
+    assert "no triangles" in client.messages[0]["error"]
+
+
+def test_reference_upload_rejects_a_scans_symlink_outside_the_project(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    server = project(root)
+    server.queue = asyncio.Queue()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "scans").symlink_to(outside, target_is_directory=True)
+    client = ReplyClient()
+
+    asyncio.run(
+        server.command(
+            json.dumps(
+                {
+                    "type": "target_reference",
+                    "name": "thing",
+                    "filename": "reference.stl",
+                    "units": "mm",
+                    "data": base64.b64encode(valid_stl()).decode(),
+                }
+            ),
+            client,
+        )
+    )
+
+    assert not list(outside.iterdir())
+    assert not (root / "parts" / "thing.md").exists()
+    assert server.queue.empty()
+    assert client.messages[0]["error"] == "unsafe reference filename"
+
+
+def test_reference_upload_rejects_continued_obj_material_path_traversal(tmp_path):
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    client = ReplyClient()
+    body = b"mtl\\\nlib ../../outside.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"
+
+    asyncio.run(
+        server.command(
+            json.dumps(
+                {
+                    "type": "target_reference",
+                    "name": "thing",
+                    "filename": "unsafe.obj",
+                    "units": "mm",
+                    "data": base64.b64encode(body).decode(),
+                }
+            ),
+            client,
+        )
+    )
+
+    assert "material libraries are not supported" in client.messages[0]["error"]
+    assert not (tmp_path / "scans").exists()
+    assert not (tmp_path / "parts" / "thing.md").exists()
+    assert server.queue.empty()
+
+
+def test_reference_upload_rejects_glb_external_resources(tmp_path):
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    client = ReplyClient()
+
+    asyncio.run(
+        server.command(
+            json.dumps(
+                {
+                    "type": "target_reference",
+                    "name": "thing",
+                    "filename": "unsafe.glb",
+                    "units": "mm",
+                    "data": base64.b64encode(glb_with_external_uri()).decode(),
+                }
+            ),
+            client,
+        )
+    )
+
+    assert "external resources are not supported" in client.messages[0]["error"]
+    assert not (tmp_path / "scans").exists()
+    assert not (tmp_path / "parts" / "thing.md").exists()
+    assert server.queue.empty()
+
+
+def test_reference_file_event_clears_cached_legacy_alignment(tmp_path, monkeypatch):
+    from nurb import server as server_mod
+
+    server = project(tmp_path)
+    part = tmp_path / "parts" / "thing.py"
+    reference = tmp_path / "scans" / "reference.stl"
+    reference.parent.mkdir()
+    reference.write_bytes(valid_stl())
+    file = "scans/reference.stl"
+    server.state["thing"]["target"] = {"file": file, "units": "mm"}
+    server.targets[(file, "mm")] = {"path": reference.resolve()}
+    key = (str(part.resolve()), file, "mm")
+    server.target_alignments[key] = [1.0] * 16
+    server.queue = asyncio.Queue()
+    server.loop = SimpleNamespace(call_soon_threadsafe=lambda fn, arg: fn(arg))
+
+    class FakeObserver:
+        def __init__(self):
+            self.scheduled = []
+
+        def schedule(self, handler, path, recursive):
+            self.scheduled.append((handler, pathlib.Path(path)))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(server_mod, "Observer", FakeObserver)
+    server.watch()
+    watched = next(handler for handler, root in server.observer.scheduled if root == tmp_path)
+
+    watched.on_any_event(
+        SimpleNamespace(is_directory=False, src_path=str(reference), dest_path="")
+    )
+
+    assert server.targets == {}
+    assert server.target_alignments == {}
+    assert server.queue.get_nowait() == str(part)
+
+
+def test_reference_remove_updates_the_card_without_deleting_the_copied_mesh(tmp_path, monkeypatch):
+    from nurb import compare
+
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    copied = tmp_path / "scans" / "thing-reference.stl"
+    copied.parent.mkdir()
+    copied.write_bytes(b"mesh")
+    removed = []
+    monkeypatch.setattr(
+        compare,
+        "remove_reference",
+        lambda part: removed.append(part) or ["target"],
+        raising=False,
+    )
+    client = ReplyClient()
+
+    asyncio.run(
+        server.command(json.dumps({"type": "target_remove", "name": "thing"}), client)
+    )
+
+    assert removed == [tmp_path / "parts" / "thing.py"]
+    assert copied.read_bytes() == b"mesh"
+    assert pathlib.Path(server.queue.get_nowait()) == tmp_path / "parts" / "thing.py"
+    assert client.messages[0]["written"] == ["target"]
 
 
 CARD = """# thing
@@ -77,6 +338,20 @@ def test_rebuild_carries_the_cards_variants(tmp_path):
         {"name": "slim", "params": {"width": 15.0}, "note": "Half width for the narrow rail."}
     ]
     assert server._wire(entry)["variants"] == entry["variants"]
+
+
+def test_rebuild_and_part_lists_expose_the_root_reconstruction_state(tmp_path):
+    server = project(tmp_path)
+    part = tmp_path / "parts" / "thing.py"
+    (tmp_path / "parts" / "thing.md").write_text(
+        '# thing\n\n```toml\nreconstruction = "bounding_box_draft"\n```\n'
+    )
+
+    entry = server.rebuild(part)
+
+    assert entry["reconstruction"] == "bounding_box_draft"
+    assert server._wire(entry)["reconstruction"] == "bounding_box_draft"
+    assert server._sync()["parts"][0]["reconstruction"] == "bounding_box_draft"
 
 
 def test_variant_rebuild_keeps_stress_defaults_but_discards_base_coordinates(tmp_path):

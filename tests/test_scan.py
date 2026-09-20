@@ -5,6 +5,8 @@ metres, because that is what Scaniverse and Polycam export. The profile is a kno
 staircase so the section has exact numbers to recover.
 """
 
+import json
+
 import numpy as np
 import pytest
 import trimesh
@@ -196,6 +198,29 @@ def test_a_bad_section_spec_names_the_grammar(tmp_path):
         scan.section(mesh, "q")
 
 
+@pytest.mark.parametrize("tolerance", [-0.1, float("nan"), float("inf")])
+def test_a_section_rejects_nonfinite_or_negative_tolerance(tmp_path, tolerance):
+    mesh, _, _ = scan.load(sheet(tmp_path))
+    with pytest.raises(ValueError, match="finite number at least 0"):
+        scan.section(mesh, "x", tolerance=tolerance)
+
+
+def test_json_keeps_short_section_loops_that_text_marks_as_noise(tmp_path):
+    large = trimesh.creation.box(extents=(100, 100, 10))
+    small = trimesh.creation.box(extents=(1, 1, 10))
+    small.apply_translation((70, 0, 0))
+    mesh = trimesh.util.concatenate((large, small))
+
+    cut = scan.section(mesh, "z")
+    result = scan.structured(tmp_path / "two.stl", mesh, "mm", "argument", [cut])
+    loops = result["sections"][0]["loops"]
+
+    assert len(loops) == 2
+    assert [loop["noise_candidate"] for loop in loops] == [False, True]
+    assert result["sections"][0]["simplification"]["noise_candidate_count"] == 1
+    assert "JSON includes them" in "\n".join(scan.section_report(cut))
+
+
 def test_a_point_cloud_names_the_fix(tmp_path):
     """A gaussian-splat export is the likeliest first-scan mistake."""
     target = tmp_path / "splat.ply"
@@ -231,3 +256,51 @@ def test_the_command_preserves_the_path_in_the_import_call(tmp_path, monkeypatch
     cli.main(["scan", str(target)])
 
     assert f"import_stl({str(target)!r})" in capsys.readouterr().out
+
+
+def test_scan_json_has_full_precision_bounds_fits_and_complete_section_points(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "cylinder.stl"
+    trimesh.creation.cylinder(radius=7.123456789, height=9.87654321, sections=256).export(target)
+    monkeypatch.chdir(tmp_path)
+
+    cli.main(["scan", str(target), "--units", "mm", "--section", "z:0.333333", "--tolerance", "0.000001", "--json"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["mesh"]["origin_mm"] == [0.0, 0.0, 0.0]
+    assert result["mesh"]["bounds_mm"]["max"][2] == pytest.approx(4.93827152)
+    section = result["sections"][0]
+    assert section["position_mm"] == pytest.approx(-1.646093, abs=1e-5)
+    assert section["simplification"]["algorithm"] == "Douglas-Peucker"
+    assert section["loops"][0]["simplified_point_count"] == len(section["loops"][0]["points_mm"])
+    assert len(section["loops"][0]["points_mm"]) > scan.LISTED
+    assert section["loops"][0]["fits"]["circle"]["radius_mm"] == pytest.approx(7.123, abs=0.01)
+    cylinder = section["loops"][0]["cylinder_candidate"]
+    assert cylinder["axis_direction"] == [0.0, 0.0, 1.0]
+    assert cylinder["axis_point_mm"][2] == pytest.approx(section["position_mm"])
+    assert cylinder["radius_mm"] == pytest.approx(7.123, abs=0.01)
+
+
+def test_scan_accepts_repeatable_batch_sections_in_json(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "box.stl"
+    trimesh.creation.box(extents=(40, 20, 10)).export(target)
+    monkeypatch.chdir(tmp_path)
+
+    cli.main(["scan", str(target), "--section", "x:0.25", "--section", "z:0.75", "--json"])
+
+    sections = json.loads(capsys.readouterr().out)["sections"]
+    assert [(section["axis"], section["position_mm"]) for section in sections] == [("x", -10.0), ("z", 2.5)]
+    assert all(section["loops"] for section in sections)
+
+
+def test_structured_scan_separates_comparison_reference_from_solid_conversion(tmp_path):
+    target = tmp_path / "open.stl"
+    trimesh.Trimesh(
+        vertices=[[-5, -4, 1.25], [5, -4, 1.25], [5, 4, 1.25], [-5, 4, 1.25]],
+        faces=[[0, 1, 2], [0, 2, 3]],
+        process=False,
+    ).export(target)
+    mesh, unit, source = scan.load(target)
+    result = scan.structured(target, mesh, unit, source)
+    assert result["comparison_reference"]["usable"] is True
+    assert result["solid_conversion"]["available"] is False
+    assert result["mesh"]["largest_planar_region_fit"]["max_residual_mm"] < 1e-8

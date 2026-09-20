@@ -5,8 +5,11 @@ One port serves both the viewer and the websocket.
 """
 
 import asyncio
+import base64
+import binascii
 import collections
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -174,6 +177,67 @@ def _user_traceback(exc, path):
 
 
 class Server:
+    REFERENCE_EXTENSIONS = {".stl", ".obj", ".glb", ".ply"}
+    REFERENCE_LIMIT = 48 * 1024 * 1024
+
+    @staticmethod
+    def _validate_reference_source(filename, body):
+        """Parse an upload without giving the mesh loader access to sidecar files."""
+        import trimesh
+
+        suffix = pathlib.Path(filename).suffix.lower()
+        if suffix == ".obj":
+            # trimesh joins OBJ backslash continuations before looking for mtllib.
+            # Mirror that normalization so `mtl\\\nlib` cannot hide a sidecar read.
+            normalized = body.replace(b"\r\n", b"\n").replace(b"\\\n", b"").lower()
+            if b"mtllib" in normalized:
+                raise ValueError(
+                    "uploaded OBJ material libraries are not supported; remove the mtllib line or export STL, GLB, or PLY"
+                )
+        elif suffix == ".glb":
+            try:
+                if len(body) < 20 or body[:4] != b"glTF":
+                    raise ValueError("incorrect header")
+                json_length = int.from_bytes(body[12:16], "little")
+                if body[16:20] != b"JSON" or 20 + json_length > len(body):
+                    raise ValueError("missing JSON chunk")
+                header = json.loads(body[20 : 20 + json_length].decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(f"{filename}: invalid GLB ({exc})") from exc
+
+            def external_uri(value):
+                if isinstance(value, dict):
+                    return any(
+                        (
+                            key == "uri"
+                            and isinstance(item, str)
+                            and not item.startswith("data:")
+                        )
+                        or external_uri(item)
+                        for key, item in value.items()
+                    )
+                if isinstance(value, list):
+                    return any(external_uri(item) for item in value)
+                return False
+
+            if external_uri(header):
+                raise ValueError(
+                    "uploaded GLB external resources are not supported; embed buffers and textures in the GLB"
+                )
+
+        try:
+            mesh = trimesh.load(
+                io.BytesIO(body),
+                file_type=suffix.removeprefix("."),
+                force="mesh",
+                resolver={},
+                skip_materials=True,
+            )
+        except Exception as exc:
+            raise ValueError(f"{filename}: {exc}") from exc
+        if not hasattr(mesh, "faces") or len(mesh.faces) == 0:
+            raise ValueError(f"{filename} has no triangles to measure, only points")
+
     def __init__(self, root, port=7373, tolerance=0.1, draft=False, open_browser=False):
         self.root = pathlib.Path(root).resolve()
         self.port = port
@@ -185,6 +249,10 @@ class Server:
         # mtime: a scan can be a quarter-million triangles, and re-reading it on
         # every save would put a constant tax on the loop for a file that never moves.
         self.targets = {}
+        # A legacy target has no stored frame. Center it once per server session and
+        # hold that frame while the editable part changes, so an extremity edit does
+        # not move the reference and disguise the actual difference.
+        self.target_alignments = {}
         # What the sliders are holding, per part, and only where it differs from the
         # file. Empty means the part is exactly what its source says.
         self.overrides = {}
@@ -318,9 +386,11 @@ class Server:
             "variants": self._variants(path),
             "variant": None,
             "stress_spots": None,
+            "reconstruction": self._reconstruction(path),
         }
         try:
             if self._crashed_entry(path, name, entry, inputs_before) is not None:
+                self._attach_target(entry, path, None)
                 self.state[name] = entry
                 return entry
             shape, params, ms = self._build(path, name, inputs_before)
@@ -353,7 +423,6 @@ class Server:
             entry["ms"] = round(ms, 1)
             entry["error"] = None
             entry["shape"] = shape  # kept for the check pass, never serialized
-            self._attach_target(entry, path, shape)
             scene = getattr(shape, "_nurb_scene", None)
             if scene is not None:
                 from .assembly import wire
@@ -380,6 +449,7 @@ class Server:
             entry["shape"] = None
             entry["error"] = f"{type(exc).__name__}: {exc}"
             entry["traceback"] = _user_traceback(exc, path)
+        self._attach_target(entry, path, entry.get("shape"))
         inputs_after = self._source_snapshot(path)
         previous_sources = self._build_sources(
             path, previous.get("shape"), inputs_before
@@ -397,6 +467,17 @@ class Server:
         )
         self.state[name] = entry
         return entry
+
+    @staticmethod
+    def _reconstruction(path):
+        """The card's root reconstruction state, for the shell's persistent draft label."""
+        from . import checks
+
+        try:
+            value = checks.settings(path).get("reconstruction")
+        except (OSError, ValueError):
+            return None
+        return value if isinstance(value, str) else None
 
     def _source_snapshot(self, path):
         """Bytes of every file a build could discover, captured at one instant."""
@@ -629,8 +710,14 @@ class Server:
 
             try:
                 hit = self._target_mesh(target["file"], target.get("units"))
-                metrics = compare.against(entry["shape"], hit["mesh"], self.tolerance)
-                # The ghost draws at the offset the numbers used, never a stale one.
+                metrics = compare.against(
+                    entry["shape"],
+                    hit["mesh"],
+                    tolerance_mm=target["tolerance_mm"],
+                    transform=target["transform"],
+                )
+                # The ghost draws with the transform the numbers used, never a stale one.
+                target["transform"] = metrics.pop("transform")
                 target["offset"] = metrics.pop("offset")
                 target["metrics"] = metrics
             except Exception as exc:
@@ -652,22 +739,49 @@ class Server:
             return
         if not declared:
             return
-        file, units = declared
+        file = declared["file"]
+        units = declared["units"]
         try:
             hit = self._target_mesh(file, units)
         except Exception as exc:
             # Broad on purpose: a target that will not load is a target problem, and
             # letting it escape here would report a part that builds fine as broken.
-            entry["target"] = {"file": file, "error": str(exc)}
+            entry["target"] = {"file": file, "units": units, "error": str(exc)}
             return
-        bb = shape.bounding_box()
-        part = ((bb.min.X + bb.max.X) / 2, (bb.min.Y + bb.max.Y) / 2, (bb.min.Z + bb.max.Z) / 2)
-        mesh = hit["mesh"].bounds.mean(axis=0)
+        transform = declared["transform"]
+        alignment = "stored" if transform is not None else "auto"
+        if transform is None:
+            key = (str(pathlib.Path(path).resolve()), file, units)
+            transform = self.target_alignments.get(key)
+            if transform is None and shape is not None:
+                import numpy as np
+
+                bb = shape.bounding_box()
+                part_center = np.asarray(
+                    (
+                        (bb.min.X + bb.max.X) / 2,
+                        (bb.min.Y + bb.max.Y) / 2,
+                        (bb.min.Z + bb.max.Z) / 2,
+                    )
+                )
+                matrix = np.eye(4)
+                matrix[:3, 3] = part_center - hit["mesh"].bounds.mean(axis=0)
+                transform = matrix.reshape(-1).tolist()
+                self.target_alignments[key] = transform
+            elif transform is None:
+                transform = compare.IDENTITY
+                alignment = "unavailable"
         entry["target"] = {
             "file": file,
             "units": units,
+            "unit": hit["unit"],
+            "unit_source": hit["unit_source"],
+            "dimensions": hit["dimensions"],
+            "tolerance_mm": declared["tolerance_mm"],
+            "transform": transform,
+            "alignment": alignment,
             "stamp": hit["stamp"],
-            "offset": [round(float(p - m), 2) for p, m in zip(part, mesh)],
+            "offset": [round(float(transform[i]), 6) for i in (3, 7, 11)],
         }
         entry["target_glb"] = hit["glb"]
 
@@ -686,16 +800,21 @@ class Server:
         # This stamp also versions the browser's geometry cache. The same bytes read
         # as metres and millimetres are different ghosts even though their mtime is
         # identical, and changing the card must replace the one already on screen.
-        identity = f"{path.resolve()}\0{units or ''}\0{path.stat().st_mtime_ns}"
+        status = path.stat()
+        identity = f"{path.resolve()}\0{units or ''}\0{status.st_mtime_ns}\0{status.st_ctime_ns}\0{status.st_size}"
         stamp = hashlib.blake2b(identity.encode(), digest_size=8).hexdigest()
         hit = self.targets.get((file, units))
         if hit and hit["stamp"] == stamp:
             return hit
-        mesh, _, _ = compare.load(self.root, file, units=units)
+        mesh, unit, unit_source = compare.load(self.root, file, units=units)
         hit = {
             "mesh": mesh,
             "glb": trimesh.Scene([mesh]).export(file_type="glb"),
             "stamp": stamp,
+            "path": path.resolve(),
+            "unit": unit,
+            "unit_source": unit_source,
+            "dimensions": [round(float(v), 6) for v in mesh.extents],
         }
         self.targets[(file, units)] = hit
         return hit
@@ -1316,6 +1435,113 @@ class Server:
         if path.parent != parts_dir or not path.is_file():
             return
 
+        if msg.get("type") == "target_settings":
+            from . import compare
+
+            changes = {
+                key: msg[key]
+                for key in ("units", "tolerance_mm", "transform")
+                if key in msg
+            }
+            if not changes:
+                await self.reply(
+                    client,
+                    {
+                        "type": "target_settings",
+                        "name": name,
+                        "error": "choose units, tolerance, or alignment to update",
+                    },
+                )
+                return
+            try:
+                written = compare.update_card(path, **changes)
+            except (ValueError, OSError) as exc:
+                await self.reply(
+                    client,
+                    {"type": "target_settings", "name": name, "error": str(exc)},
+                )
+                return
+            # Queue explicitly as well as relying on the file watcher. This command is
+            # also exercised by adapters and tests with no native watcher delivering
+            # the card write back to the process.
+            self.queue.put_nowait(str(path))
+            await self.reply(
+                client,
+                {"type": "target_settings", "name": name, "written": written},
+            )
+            return
+
+        if msg.get("type") in ("target_reference", "target_remove"):
+            from . import checks, compare
+
+            try:
+                if msg.get("type") == "target_remove":
+                    written = compare.remove_reference(path)
+                else:
+                    filename = pathlib.Path(str(msg.get("filename") or "")).name
+                    suffix = pathlib.Path(filename).suffix.lower()
+                    if suffix not in self.REFERENCE_EXTENSIONS:
+                        supported = ", ".join(sorted(self.REFERENCE_EXTENSIONS))
+                        raise ValueError(f"reference must be one of: {supported}")
+                    encoded = msg.get("data")
+                    if not isinstance(encoded, str):
+                        raise ValueError("reference upload has no file data")
+                    try:
+                        body = base64.b64decode(encoded, validate=True)
+                    except (binascii.Error, ValueError) as exc:
+                        raise ValueError("reference upload is not valid base64 data") from exc
+                    if not body:
+                        raise ValueError("reference file is empty")
+                    if len(body) > self.REFERENCE_LIMIT:
+                        raise ValueError("reference file is larger than the 48 MB viewer limit")
+                    self._validate_reference_source(filename, body)
+                    units = msg.get("units")
+                    from .scan import UNITS
+
+                    if units not in UNITS:
+                        raise ValueError(f"reference units must be one of {', '.join(UNITS)}")
+                    safe = _export_name(pathlib.Path(filename).stem)[:48] or "mesh"
+                    digest = hashlib.blake2b(body, digest_size=5).hexdigest()
+                    relative = pathlib.Path("scans") / f"{name}-{safe}-{digest}{suffix}"
+                    destination = (self.root / relative).resolve()
+                    scans = (self.root / "scans").resolve()
+                    if not scans.is_relative_to(self.root) or destination.parent != scans or not destination.is_relative_to(self.root):
+                        raise ValueError("unsafe reference filename")
+                    scans.mkdir(exist_ok=True)
+                    created = not destination.exists()
+                    if created:
+                        destination.write_bytes(body)
+                    try:
+                        compare.load(self.root, relative.as_posix(), units=units)
+                        declared = compare.setting(checks.settings(path))
+                        tolerance = declared["tolerance_mm"] if declared else compare.DEFAULT_TOLERANCE_MM
+                        written = compare.attach_reference(
+                            path,
+                            relative.as_posix(),
+                            units=units,
+                            tolerance_mm=tolerance,
+                        )
+                    except Exception:
+                        if created:
+                            destination.unlink(missing_ok=True)
+                        raise
+                self.targets.clear()
+                self.target_alignments = {
+                    key: value for key, value in self.target_alignments.items() if key[0] != str(path)
+                }
+            except (ValueError, OSError) as exc:
+                await self.reply(
+                    client,
+                    {"type": "target_reference", "name": name, "error": str(exc)},
+                )
+                return
+            self.queue.put_nowait(str(path))
+            await self.reply(
+                client,
+                {"type": "target_reference", "name": name, "written": written},
+            )
+            return
+
         if msg.get("type") == "params":
             values = {
                 k: v
@@ -1444,10 +1670,47 @@ class Server:
             def on_any_event(self, event):
                 if event.is_directory:
                     return
-                path = pathlib.Path(
-                    getattr(event, "dest_path", "") or event.src_path
-                ).resolve()
-                # "." skips the atomic-save temp files editors and sed leave behind
+                source = pathlib.Path(event.src_path).resolve()
+                destination = getattr(event, "dest_path", "")
+                paths = {source}
+                if destination:
+                    paths.add(pathlib.Path(destination).resolve())
+                path = pathlib.Path(destination).resolve() if destination else source
+                affected = []
+                # The watchdog callback runs on its own thread while drain replaces
+                # completed entries on the event loop. Snapshot before resolving files
+                # so a rebuild cannot resize the dictionary mid-iteration.
+                for name, entry in list(server.state.items()):
+                    target = entry.get("target") or {}
+                    file = target.get("file")
+                    if not file:
+                        continue
+                    target_path = pathlib.Path(file)
+                    if not target_path.is_absolute():
+                        target_path = server.root / target_path
+                    if target_path.resolve() in paths:
+                        part = parts_dir / f"{name}.py"
+                        if part.is_file():
+                            affected.append(part)
+                if affected:
+                    server.targets = {
+                        key: hit
+                        for key, hit in server.targets.items()
+                        if hit.get("path") not in paths
+                    }
+                    affected_paths = {str(part.resolve()) for part in affected}
+                    server.target_alignments = {
+                        key: value
+                        for key, value in server.target_alignments.items()
+                        if key[0] not in affected_paths
+                    }
+                    for target in affected:
+                        server.loop.call_soon_threadsafe(
+                            server.queue.put_nowait, str(target)
+                        )
+                    return
+                # "." skips atomic-save temp files editors and sed leave behind. A
+                # configured reference with such a name was handled explicitly above.
                 if path.name.startswith((".", "_")):
                     return
                 if path != global_config and path.parent not in (parts_dir, server.root):
@@ -1481,8 +1744,7 @@ class Server:
         # Held on self: a dropped Observer can be collected and take its
         # FSEvents stream with it, and the watcher silently stops firing.
         self.observer = Observer()
-        self.observer.schedule(Handler(), str(parts_dir), recursive=False)
-        self.observer.schedule(Handler(), str(self.root), recursive=False)
+        self.observer.schedule(Handler(), str(self.root), recursive=True)
         # Created before it is watched: on a machine that has never named a printer
         # the first pick, or the agent, creates this directory mid-session, and a
         # directory that did not exist at start would never be observed.
@@ -1608,7 +1870,7 @@ class Server:
         # from our own viewer do not need a handshake deadline.
         async with serve(
             self.ws, "127.0.0.1", self.port, process_request=self.http,
-            origins=self.origins, open_timeout=None,
+            origins=self.origins, open_timeout=None, max_size=70 * 1024 * 1024,
         ):
             print(f"\n  nurb  http://127.0.0.1:{self.port}\n", flush=True)
             if self.open_browser:
