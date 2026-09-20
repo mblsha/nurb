@@ -9,17 +9,6 @@ export function finiteArray(data, length) {
     && data.every(value => typeof value === 'number' && Number.isFinite(value));
 }
 
-export function diagonalFovRadians(verticalFovDegrees, aspect) {
-  const vertical = THREE.MathUtils.degToRad(verticalFovDegrees);
-  return 2 * Math.atan(Math.tan(vertical / 2) * Math.sqrt(1 + aspect * aspect));
-}
-
-export function verticalFovDegrees(diagonalFov, aspect) {
-  return THREE.MathUtils.radToDeg(
-    2 * Math.atan(Math.tan(diagonalFov / 2) / Math.sqrt(1 + aspect * aspect)),
-  );
-}
-
 export function synchronizedOrbitTarget(previousPosition, previousTarget, position, orientation) {
   const distance = Math.max(previousPosition.distanceTo(previousTarget), 1e-6);
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(orientation).normalize();
@@ -211,7 +200,7 @@ export class SpaceMouseControls {
   getConstructionPlane() { return [0, 0, 1, 0]; }
   getFloorPlane() { return [0, 0, 1, 0]; }
   getUnitsToMeters() { return 0.001; }
-  getPerspective() { return true; }
+  getPerspective() { return false; }
   getViewRotatable() { return this.options.controls.enabled; }
   getViewTarget() { return this.options.controls.target.toArray(); }
   getPivotPosition() { return this.getViewTarget(); }
@@ -222,16 +211,15 @@ export class SpaceMouseControls {
     }
     return [...bounds.min.toArray(), ...bounds.max.toArray()];
   }
-  getFov() { return diagonalFovRadians(this.options.camera.fov, this.options.camera.aspect); }
+  getFov() { return 0; }
   getViewMatrix() {
     this.options.camera.updateMatrixWorld(true);
     return this.options.camera.matrixWorld.toArray();
   }
   getViewExtents() {
     const camera = this.options.camera;
-    const halfHeight = camera.near * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
-    const halfWidth = halfHeight * camera.aspect;
-    return [-halfWidth, -halfHeight, -camera.far, halfWidth, halfHeight, -camera.near];
+    return [camera.left / camera.zoom, camera.bottom / camera.zoom, -camera.far,
+      camera.right / camera.zoom, camera.top / camera.zoom, -camera.near];
   }
   getViewFrustum() {
     const [left, bottom, far, right, top, near] = this.getViewExtents();
@@ -265,13 +253,17 @@ export class SpaceMouseControls {
     camera.updateMatrixWorld(true);
   }
 
-  setViewExtents(_data) {}
-  setFov(data) {
-    if (!this.options.controls.enabled || typeof data !== 'number'
-        || !Number.isFinite(data) || data <= 0 || data >= Math.PI) return;
-    this.options.camera.fov = verticalFovDegrees(data, this.options.camera.aspect);
-    this.options.camera.updateProjectionMatrix();
+  setViewExtents(data) {
+    if (!this.options.controls.enabled || !finiteArray(data, 6)) return;
+    const width = data[3] - data[0], height = data[4] - data[1];
+    if (width <= 0 || height <= 0 || data[5] <= data[2]) return;
+    const camera = this.options.camera;
+    const zoom = (camera.top - camera.bottom) / height;
+    if (!Number.isFinite(zoom) || zoom < 1e-8 || zoom > 1e6) return;
+    camera.zoom = zoom;
+    camera.updateProjectionMatrix();
   }
+  setFov(_data) {}
   setTarget(data) {
     if (this.options.controls.enabled && finiteArray(data, 3)) this.options.controls.target.fromArray(data);
   }

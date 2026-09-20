@@ -842,8 +842,7 @@ const main = document.querySelector('main');
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x16181d);
 
-const DEFAULT_CAMERA_FOV = 45;
-const camera = new THREE.PerspectiveCamera(DEFAULT_CAMERA_FOV, 1, 0.1, 10000);
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10000);
 camera.up.set(0, 0, 1);
 
 // stencil: the section view caps its cut with a stencil pass, and the buffer is off
@@ -1702,13 +1701,18 @@ function renderViewCube() {
 }
 
 let lastW = 0, lastH = 0;
+function resizeOrthographicCamera(cam, width, height) {
+  const aspect = Math.max(width, 1) / Math.max(height, 1);
+  cam.left = -aspect; cam.right = aspect;
+  cam.top = 1; cam.bottom = -1;
+  cam.updateProjectionMatrix();
+}
 function resize() {
   const w = main.clientWidth, h = main.clientHeight;
   if (!w || !h || (w === lastW && h === lastH)) return;   // belt and braces
   lastW = w; lastH = h;
   renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+  resizeOrthographicCamera(camera, w, h);
 }
 if (renderer) {
   new ResizeObserver(resize).observe(main);
@@ -2502,9 +2506,10 @@ if (cutting) {  // a ?cut= URL arrives with the section already open, so the pil
 
 // ---- camera persistence ----
 // A rebuild is a geometry swap, never a camera reset. Reloads restore per part.
-const camKey = n => `nurb.cam.v4.${n}`;  // v4 persists perspective zoom as well as roll
-const oldCamKey = n => `nurb.cam.v3.${n}`;
-const legacyCamKey = n => `nurb.cam.v2.${n}`;
+const camKey = n => `nurb.cam.v5.${n}`;  // v5 uses orthographic zoom; older views keep their direction
+const oldCamKey = n => `nurb.cam.v4.${n}`;
+const legacyCamKey = n => `nurb.cam.v3.${n}`;
+const oldestCamKey = n => `nurb.cam.v2.${n}`;
 let saveTimer = null;
 function saveCamera(name, state) {
   if (name) localStorage.setItem(camKey(name), JSON.stringify(state));
@@ -2512,7 +2517,7 @@ function saveCamera(name, state) {
 function queueCameraSave() {
   if (!current || !controls) return;
   const name = current;
-  const state = { p: camera.position.toArray(), t: controls.target.toArray(), u: camera.up.toArray(), f: camera.fov };
+  const state = { p: camera.position.toArray(), t: controls.target.toArray(), u: camera.up.toArray(), z: camera.zoom };
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => saveCamera(name, state), 250);
 }
@@ -2533,24 +2538,37 @@ function sane(p, t, box) {
 
 function restoreCamera(name, box) {
   try {
-    const s = JSON.parse(localStorage.getItem(camKey(name))
-      || localStorage.getItem(oldCamKey(name)) || localStorage.getItem(legacyCamKey(name)));
+    const saved = localStorage.getItem(camKey(name));
+    const perspectiveSaved = saved ? null : localStorage.getItem(oldCamKey(name));
+    const olderSaved = saved || perspectiveSaved ? null
+      : localStorage.getItem(legacyCamKey(name)) || localStorage.getItem(oldestCamKey(name));
+    const s = JSON.parse(saved || perspectiveSaved || olderSaved);
     if (!s) return false;
     const p = new THREE.Vector3().fromArray(s.p);
     const t = new THREE.Vector3().fromArray(s.t);
-    const fov = s.f === undefined ? null : Number(s.f);
-    if (!sane(p, t, box) || (fov !== null && (!Number.isFinite(fov) || fov <= 0 || fov >= 180))) return false;
+    const zoom = s.z === undefined ? null : Number(s.z);
+    if (!sane(p, t, box) || (saved && (zoom === null
+      || !Number.isFinite(zoom) || zoom < 1e-8 || zoom > 1e6))) return false;
     cameraTransition = null;
     camera.position.copy(p);
     controls.target.copy(t);
     if (Array.isArray(s.u) && s.u.length === 3) camera.up.fromArray(s.u).normalize();
     else camera.up.copy(Math.abs(p.clone().sub(t).normalize().z) > .999
       ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1));
-    if (fov !== null) camera.fov = fov;
     // frame()'s clipping planes for this part, not whatever the last part left behind.
     const size = box.getSize(new THREE.Vector3());
     const span = Math.max(size.x, size.y, size.z) || 10;
     camera.near = span / 100; camera.far = span * 100;
+    camera.lookAt(controls.target);
+    const fov = perspectiveSaved && Number(s.f);
+    const verticalSpan = Number.isFinite(fov) && fov > 0 && fov < 180
+      ? 2 * p.distanceTo(t) * Math.tan(fov * Math.PI / 360) : null;
+    // v4 stored a perspective field of view. Preserve its vertical world span when
+    // migrating; v3/v2 did not store enough information, so keep their view and fit it.
+    camera.zoom = zoom ?? (verticalSpan && Number.isFinite(verticalSpan)
+      ? Math.abs(camera.top - camera.bottom) / verticalSpan
+      : orthographicFitZoom(camera, box, 2.1));
+    if (!Number.isFinite(camera.zoom) || camera.zoom < 1e-8 || camera.zoom > 1e6) return false;
     camera.updateProjectionMatrix();
     controls.update();
     // sane() is a distance argument, not a visibility one: a stale camera can keep a
@@ -2574,6 +2592,20 @@ function viewDir(from) {
   return len ? v.map(c => c / len) : null;
 }
 
+function orthographicFitZoom(cam, box, pad) {
+  cam.updateMatrixWorld(true);
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y])
+    for (const z of [box.min.z, box.max.z]) {
+      const point = new THREE.Vector3(x, y, z).applyMatrix4(cam.matrixWorldInverse);
+      minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x);
+      minY = Math.min(minY, point.y); maxY = Math.max(maxY, point.y);
+    }
+  const width = Math.max(maxX - minX, 1e-9), height = Math.max(maxY - minY, 1e-9);
+  return Math.min(Math.abs(cam.right - cam.left) / (width * pad),
+    Math.abs(cam.top - cam.bottom) / (height * pad));
+}
+
 function frame(box, from, preserveDirection = false) {
   cameraTransition = null;
   const size = box.getSize(new THREE.Vector3());
@@ -2582,7 +2614,7 @@ function frame(box, from, preserveDirection = false) {
   // A named view is only ever asked for by a still, and a still does not need the
   // headroom that orbiting comfortably does, so it gets a tighter fit.
   const pad = from ? 1.45 : 2.1;
-  const dist = span / (2 * Math.tan((camera.fov * Math.PI / 180) / 2)) * pad;
+  const dist = span * 4;
   const dir = preserveDirection && controls
     ? camera.position.clone().sub(controls.target).normalize().toArray()
     : viewDir(from) || VIEWS.iso;
@@ -2597,6 +2629,8 @@ function frame(box, from, preserveDirection = false) {
   camera.position.set(mid.x + dist * dir[0], mid.y + dist * dir[1], mid.z + dist * dir[2]);
   controls.target.copy(mid);
   camera.near = span / 100; camera.far = span * 100;
+  camera.lookAt(controls.target);
+  camera.zoom = orthographicFitZoom(camera, box, pad);
   camera.updateProjectionMatrix();
   controls.update();
 }
@@ -2810,10 +2844,7 @@ async function paint(name, { keepCamera }) {
   // same way once it is fixed. There is no camera to keep in either case, so keeping it
   // leaves the camera at the origin and paints a blank canvas over a perfectly good mesh.
   const keep = keepCamera && framed === name;
-  if (!keep) {
-    camera.fov = DEFAULT_CAMERA_FOV;
-    camera.updateProjectionMatrix();
-  }
+  if (!keep) camera.zoom = 1;
   if (view) {
     frame(box, view);                       // asked for a named view: no saved camera
     reframe.style.display = 'none';

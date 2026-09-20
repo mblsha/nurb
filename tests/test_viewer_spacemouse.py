@@ -38,29 +38,33 @@ def run_module(tmp_path, source):
     assert result.returncode == 0, result.stderr
 
 
-def test_perspective_math_z_up_frame_and_orbit_target(tmp_path):
+def test_orthographic_extents_z_up_frame_and_orbit_target(tmp_path):
     run_module(
         tmp_path,
         """
 import assert from 'node:assert/strict';
-const diagonal = nav.diagonalFovRadians(48, 16 / 9);
-assert.ok(Math.abs(nav.verticalFovDegrees(diagonal, 16 / 9) - 48) < 1e-10);
-
-const camera = new THREE.PerspectiveCamera(48, 16 / 9, .1, 1000);
+const camera = new THREE.OrthographicCamera(-2, 2, 1, -1, .1, 1000);
+camera.zoom = .01;
 camera.position.set(0, 0, 10); camera.updateMatrixWorld(true);
 const controls = { enabled: true, target: new THREE.Vector3(),
   _sphericalDelta: new THREE.Spherical(3, 2, 1), _panOffset: new THREE.Vector3(1, 2, 3),
   _scale: 2, _performCursorZoom: true };
 const bridge = new nav.SpaceMouseControls({ camera, controls, viewport: {},
   getModelBounds: box => box.set(new THREE.Vector3(-2, -3, -4), new THREE.Vector3(5, 6, 7)) });
-assert.equal(bridge.getPerspective(), true);
+assert.equal(bridge.getPerspective(), false);
 assert.equal(bridge.getUnitsToMeters(), .001);
 assert.deepEqual(bridge.getFloorPlane(), [0, 0, 1, 0]);
 assert.deepEqual(bridge.getConstructionPlane(), [0, 0, 1, 0]);
 assert.deepEqual(bridge.getCoordinateSystem(), new THREE.Matrix4().makeRotationX(-Math.PI / 2).toArray());
 assert.deepEqual(bridge.getFrontView(), new THREE.Matrix4().makeRotationX(Math.PI / 2).toArray());
 assert.deepEqual(bridge.getModelExtents(), [-2, -3, -4, 5, 6, 7]);
-assert.ok(Math.abs(bridge.getFov() - diagonal) < 1e-10);
+assert.equal(bridge.getFov(), 0);
+assert.deepEqual(bridge.getViewExtents(), [-200, -100, -1000, 200, 100, -.1]);
+bridge.setViewExtents([-100, -50, -1000, 100, 50, -.1]);
+assert.equal(camera.zoom, .02);
+assert.equal(camera.right, 2);
+bridge.setViewExtents([0, 0, -1000, 0, 0, -.1]);
+assert.equal(camera.zoom, .02);
 
 const panned = bridge.getViewMatrix(); panned[12] += 2;
 bridge.setViewMatrix(panned);
@@ -102,7 +106,7 @@ class FakeSdk {
   update3dcontroller(data) { if (data.frame?.time !== undefined) this.frames++; }
 }
 window._3Dconnexion = FakeSdk;
-const camera = new THREE.PerspectiveCamera(45, 1, .1, 1000);
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, .1, 1000);
 camera.position.set(0, 0, 10);
 const controls = { enabled: true, target: new THREE.Vector3(), dispatchEvent() {} };
 const states = [];
@@ -137,6 +141,7 @@ assert.ok(instances[1].deleted >= 1);
 def test_viewer_and_desktop_join_the_navigation_lifecycle():
     desktop = (ROOT / "desktop/src/App.tsx").read_text(encoding="utf-8")
     assert "import { SpaceMouseControls } from '/spacemouse.js';" in VIEWER
+    assert "new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10000)" in VIEWER
     assert 'id="spacemouse"' in VIEWER
     assert "if (controls && !bare)" in VIEWER
     assert "getModelBounds: target => currentFrameBox" in VIEWER
