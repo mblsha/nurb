@@ -108,8 +108,9 @@ export default function About({
           <p>
             The app ships <b>uv</b> (MIT, also offered under Apache-2.0), which performs
             that install, and the nurb viewer's vendored copies of <b>three.js</b> r169
-            (MIT) and the <b>JetBrains Mono</b> font (SIL OFL 1.1), each carrying its own
-            license file.
+            (MIT), the <b>JetBrains Mono</b> font (SIL OFL 1.1), and the official
+            <b>3DconnexionJS</b> 0.7.0 browser adapter (3Dconnexion Software Development
+            Kit license), each carrying its own license or provenance notice.
           </p>
           <details>
             <summary>uv license (MIT)</summary>

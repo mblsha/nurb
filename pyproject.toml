@@ -52,6 +52,7 @@ build-backend = "uv_build"
 module-name = ["nurb", "nurb_entrypoint"]
 source-include = [
     "src/nurb/viewer.html",
+    "src/nurb/spacemouse.js",
     "src/nurb/doctrine.md",
     "src/nurb/agents.md",
     "src/nurb/skill.md",

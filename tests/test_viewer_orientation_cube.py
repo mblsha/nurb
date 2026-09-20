@@ -74,6 +74,30 @@ assert.ok(Math.abs(clamped.position.distanceTo(target) - 20) < 1e-9);
     )
 
 
+def test_spacemouse_motion_refuses_new_cube_transitions():
+    canonical = function("function cubeCanonicalView(", "\n\nlet cameraTransition")
+    start = function("function startCubeView(", "\n\nfunction updateCameraTransition")
+    run_js(
+        f"import * as THREE from {json.dumps(THREE)};\n"
+        "import assert from 'node:assert/strict';\n"
+        + canonical
+        + "\nlet cameraTransition = null;\n"
+        + start
+        + """
+const camera = new THREE.PerspectiveCamera(45, 1, .1, 1000);
+camera.position.set(10, -10, 10); camera.lookAt(0, 0, 0);
+const controls = { target: new THREE.Vector3() };
+const currentFrameBox = null;
+const spaceMouse = { moving: true };
+assert.equal(startCubeView([1, 0, 0]), false);
+assert.equal(cameraTransition, null);
+spaceMouse.moving = false;
+assert.equal(startCubeView([1, 0, 0]), true);
+assert.ok(cameraTransition);
+"""
+    )
+
+
 def test_direction_names_and_shortcuts_describe_the_keyboard_surface():
     helpers = function("function cubeDirectionName(", "\n\nfunction cubeCanonicalView")
     run_js(
@@ -103,9 +127,54 @@ def test_cube_is_accessible_and_keeps_one_webgl_context():
     assert "renderTriad" not in VIEWER
 
 
-def test_camera_roll_is_saved_and_legacy_positions_still_restore():
-    assert "`nurb.cam.v3.${n}`" in VIEWER
+def test_camera_roll_zoom_and_legacy_positions_are_persisted():
+    assert "`nurb.cam.v4.${n}`" in VIEWER
     assert "u: camera.up.toArray()" in VIEWER
+    assert "f: camera.fov" in VIEWER
     assert "setTimeout(() => saveCamera(name, state), 250)" in VIEWER
     assert "localStorage.getItem(oldCamKey(name))" in VIEWER
+    assert "localStorage.getItem(legacyCamKey(name))" in VIEWER
     assert "camera.up.fromArray(s.u).normalize()" in VIEWER
+    assert "if (fov !== null) camera.fov = fov" in VIEWER
+
+
+def test_perspective_zoom_round_trips_and_invalid_zoom_is_rejected(tmp_path):
+    persistence = function("const camKey", "\n\n// A view is")
+    run_js(
+        f"import * as THREE from {json.dumps(THREE)};\n"
+        "import assert from 'node:assert/strict';\n"
+        + """
+const storage = new Map();
+const localStorage = { getItem: key => storage.get(key) ?? null,
+  setItem: (key, value) => storage.set(key, value) };
+const camera = new THREE.PerspectiveCamera(45, 1, .1, 1000);
+const controls = { target: new THREE.Vector3(), addEventListener() {},
+  update() { camera.lookAt(this.target); } };
+let current = 'part', cameraTransition = null;
+"""
+        + persistence
+        + """
+const box = new THREE.Box3(new THREE.Vector3(-5, -5, -5), new THREE.Vector3(5, 5, 5));
+camera.position.set(0, -20, 10); camera.up.set(0, 0, 1); camera.fov = 63;
+controls.target.set(0, 0, 0); camera.lookAt(controls.target);
+queueCameraSave();
+await new Promise(resolve => setTimeout(resolve, 275));
+const saved = JSON.parse(storage.get(camKey('part')));
+assert.equal(saved.f, 63);
+
+camera.position.set(30, 30, 30); controls.target.set(1, 1, 1); camera.fov = 45;
+assert.equal(restoreCamera('part', box), true);
+assert.equal(camera.fov, 63);
+
+storage.set(camKey('part'), JSON.stringify({ ...saved, f: -1 }));
+camera.fov = 45;
+assert.equal(restoreCamera('part', box), false);
+assert.equal(camera.fov, 45);
+
+storage.delete(camKey('part'));
+storage.set(oldCamKey('part'), JSON.stringify({ p: saved.p, t: saved.t, u: saved.u }));
+camera.fov = 51;
+assert.equal(restoreCamera('part', box), true);
+assert.equal(camera.fov, 51);
+"""
+    )

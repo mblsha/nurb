@@ -27,6 +27,7 @@ from websockets.datastructures import Headers
 from . import __version__, builder, crash, extract, registry
 
 VIEWER = pathlib.Path(__file__).parent / "viewer.html"
+SPACEMOUSE = pathlib.Path(__file__).parent / "spacemouse.js"
 CRASHED = "NURB_CRASHED"  # the environment variable a crash restart carries its marker in
 VENDOR = (pathlib.Path(__file__).parent / "vendor").resolve()
 
@@ -825,6 +826,8 @@ class Server:
         path = request.path.split("?")[0]
         if path == "/":
             return self._resp(200, VIEWER.read_bytes(), "text/html; charset=utf-8")
+        if path == "/spacemouse.js":
+            return self._resp(200, SPACEMOUSE.read_bytes(), "text/javascript; charset=utf-8")
         if path.startswith("/export/"):
             # ?save is the desktop shell, which has no browser download but does have
             # the project folder open.

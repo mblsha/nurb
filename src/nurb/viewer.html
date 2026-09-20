@@ -387,11 +387,21 @@
                             color: var(--dim); font-size: 9px; text-overflow: ellipsis;
                             white-space: nowrap; pointer-events: auto; }
   #viewcubeactions button:focus-visible { color: var(--accent); border-color: #456955; }
-  #viewcubefit { display: block; width: calc(100% - 8px); height: 22px; margin: 2px 4px 0;
-                 padding: 0; border-radius: 5px; color: var(--dim); background: rgba(29,32,39,.94);
-                 font: 700 8px "JetBrains Mono", ui-monospace, monospace; letter-spacing: .1em;
-                 pointer-events: auto; }
-  #viewcubefit:hover, #viewcubefit:focus-visible { color: var(--accent); border-color: #456955; }
+  #viewcubebar { display: flex; height: 22px; margin: 2px 4px 0; gap: 3px; }
+  #viewcubebar button { min-width: 0; height: 22px; padding: 0 3px; border-radius: 5px;
+                        color: var(--dim); background: rgba(29,32,39,.94);
+                        font: 700 8px "JetBrains Mono", ui-monospace, monospace;
+                        letter-spacing: .08em; pointer-events: auto; }
+  #viewcubefit { flex: .75; }
+  #spacemouse { flex: 2.25; font-size: 7px; letter-spacing: .03em; }
+  #viewcubebar button:hover, #viewcubebar button:focus-visible { color: var(--accent); border-color: #456955; }
+  #spacemouse::before { content: ''; display: inline-block; width: 5px; height: 5px; margin-right: 4px;
+                        border-radius: 50%; background: var(--dim); vertical-align: 1px; }
+  #spacemouse[data-state=ready]::before { background: var(--accent); }
+  #spacemouse[data-state=moving] { color: var(--accent); border-color: #456955; }
+  #spacemouse[data-state=moving]::before { background: var(--accent); box-shadow: 0 0 0 3px rgba(110,231,168,.16); }
+  #spacemouse[data-state=unavailable], #spacemouse[data-state=disconnected] { color: var(--warn); }
+  #spacemouse[data-state=unavailable]::before, #spacemouse[data-state=disconnected]::before { background: var(--warn); }
   body.bare #viewcube, body.nogl #viewcube, body.noparts #viewcube { display: none; }
   @media (max-height: 300px) { #viewcube { transform: scale(.78); transform-origin: right bottom; } }
   #platecap .pickmenu button { justify-content: flex-start; }
@@ -628,7 +638,10 @@
          aria-label="View cube. Select a face, edge, or corner to orient the part. Select an aligned face again to flip vertical. Keys: 1 front, 2 back, 3 right, 4 left, 5 top, 6 bottom, 7 isometric, F fit."
          title="Select a face, edge, or corner. Select an aligned face again to flip vertical."></div>
     <div id="viewcubeactions" role="group" aria-label="Face, edge, and corner views"></div>
-    <button id="viewcubefit" type="button" title="fit the part in the view (F)">FIT</button>
+    <div id="viewcubebar">
+      <button id="viewcubefit" type="button" title="fit the part in the view (F)">FIT</button>
+      <button id="spacemouse" type="button" data-state="loading" aria-label="SpaceMouse loading">3D MOUSE</button>
+    </div>
   </div>
   <div id="empty">
     <div>
@@ -737,6 +750,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { SpaceMouseControls } from '/spacemouse.js';
 
 const parts = new Map();
 // Constructions the project's parts repeat, from the server's duplication scan.
@@ -746,6 +760,7 @@ let sharedRuns = [];
 // part becomes current the moment it is selected and only gets a camera once its
 // geometry lands. Nothing is framed until the first mesh paints.
 let current = null, mesh = null, lastSize = null, framed = null, currentFrameBox = null;
+let spaceMouse = null;
 
 // A headless render drives this same page, so the scene an agent sees is the scene a
 // human sees. ?view= also means "frame it deterministically", ignoring the saved camera.
@@ -780,7 +795,12 @@ if (embed) {
   // place, which freezes the picture while the rest of the page stays live. A
   // message runs the same path as a click on the viewer's own part list.
   window.addEventListener('message', e => {
-    if (e.source !== window.parent || !e.data || e.data.type !== 'nurb:part') return;
+    if (e.source !== window.parent || !e.data) return;
+    if (e.data.type === 'nurb:focus') {
+      spaceMouse?.setApplicationFocus(!!e.data.focused);
+      return;
+    }
+    if (e.data.type !== 'nurb:part') return;
     const name = String(e.data.name);
     const hasConfiguration = Object.prototype.hasOwnProperty.call(e.data, 'variant');
     const vname = hasConfiguration && e.data.variant !== null ? String(e.data.variant) : null;
@@ -822,7 +842,8 @@ const main = document.querySelector('main');
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x16181d);
 
-const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
+const DEFAULT_CAMERA_FOV = 45;
+const camera = new THREE.PerspectiveCamera(DEFAULT_CAMERA_FOV, 1, 0.1, 10000);
 camera.up.set(0, 0, 1);
 
 // stencil: the section view caps its cut with a stencil pass, and the buffer is off
@@ -1545,7 +1566,7 @@ function cubeCanonicalView(cam, target, direction, minimumDistance = 0) {
 
 let cameraTransition = null;
 function startCubeView(direction) {
-  if (!controls) return;
+  if (!controls || spaceMouse?.moving) return false;
   const sphere = currentFrameBox?.getBoundingSphere(new THREE.Sphere());
   const minimumDistance = sphere
     ? sphere.radius * 1.4 + controls.target.distanceTo(sphere.center) : 0;
@@ -1554,6 +1575,7 @@ function startCubeView(direction) {
     target: controls.target.clone(), distance: selected.distance,
     fromOrientation: camera.quaternion.clone(), toOrientation: selected.orientation,
     toPosition: selected.position, toUp: selected.up };
+  return true;
 }
 
 function updateCameraTransition(now) {
@@ -1609,13 +1631,57 @@ cubeHit.onclick = event => {
 };
 cubeHit.onkeydown = event => {
   const direction = cubeKeyDirection(event.key);
-  if (event.key.toLowerCase() === 'f') fitCurrentView();
-  else if (direction) startCubeView(direction);
-  else return;
+  const fit = event.key.toLowerCase() === 'f';
+  if (!fit && !direction) return;
   event.preventDefault();
+  if (spaceMouse?.moving) return;
+  if (fit) fitCurrentView();
+  else startCubeView(direction);
 };
 document.getElementById('viewcubefit').onclick = () => fitCurrentView();
 if (controls) controls.addEventListener('start', () => { cameraTransition = null; });
+
+const spaceMouseButton = document.getElementById('spacemouse');
+function presentSpaceMouse(state, detail) {
+  const connected = state === 'ready' || state === 'moving';
+  const busy = state === 'loading' || state === 'connecting';
+  const retry = state === 'unavailable' || state === 'disconnected';
+  const navigating = state === 'moving';
+  const reconnect = `nurb could not connect to the SpaceMouse bridge. Start 3DxWare, or allow ${location.origin} in your local SpaceMouse bridge, then click to retry.`;
+  spaceMouseButton.dataset.state = state;
+  spaceMouseButton.disabled = busy;
+  spaceMouseButton.setAttribute('aria-label', `SpaceMouse ${state}${retry ? ', click to retry' : ''}`);
+  spaceMouseButton.title = connected
+    ? 'SpaceMouse camera navigation is ready. Adjust speed and buttons in 3Dconnexion Settings.'
+    : retry
+      ? `${detail ? `${detail} ` : ''}${reconnect}`
+      : detail || `SpaceMouse ${state}.`;
+  cubeHit.setAttribute('aria-disabled', String(navigating));
+  cubeHit.title = navigating
+    ? 'SpaceMouse navigation is active.'
+    : 'Select a face, edge, or corner. Select an aligned face again to flip vertical.';
+  document.getElementById('viewcubefit').disabled = navigating;
+  for (const action of cubeActions.children) action.disabled = navigating;
+}
+if (controls && !bare) {
+  spaceMouse = new SpaceMouseControls({
+    camera,
+    controls,
+    viewport: renderer.domElement,
+    focusScope: document.body,
+    followWindowFocus: !embed,
+    getModelBounds: target => currentFrameBox ? target.copy(currentFrameBox) : target.makeEmpty(),
+    onMotionStart: () => { cameraTransition = null; },
+    onCameraChange: () => { controls.dispatchEvent({ type: 'change' }); queueCameraSave(); },
+    onStateChange: presentSpaceMouse,
+  });
+  spaceMouseButton.onclick = () => {
+    if (spaceMouse.state === 'unavailable' || spaceMouse.state === 'disconnected') void spaceMouse.connect();
+  };
+  window.addEventListener('beforeunload', () => spaceMouse.dispose(), { once: true });
+  window.__nurb.spaceMouse = spaceMouse;
+  void spaceMouse.connect();
+}
 
 function renderViewCube() {
   if (bare || !cubeHit.offsetParent) return;   // headless stills document the part, not its chrome
@@ -1649,8 +1715,10 @@ if (renderer) {
   resize();
   (function tick() {
     requestAnimationFrame(tick);
-    updateCameraTransition(performance.now());
-    controls.update();
+    const now = performance.now();
+    spaceMouse?.updateFrame(now);
+    if (spaceMouse?.moving) cameraTransition = null;
+    else { updateCameraTransition(now); controls.update(); }
     renderer.render(scene, camera);
     renderViewCube();
   })();
@@ -2434,8 +2502,9 @@ if (cutting) {  // a ?cut= URL arrives with the section already open, so the pil
 
 // ---- camera persistence ----
 // A rebuild is a geometry swap, never a camera reset. Reloads restore per part.
-const camKey = n => `nurb.cam.v3.${n}`;  // v3 persists roll as well as position and target
-const oldCamKey = n => `nurb.cam.v2.${n}`;
+const camKey = n => `nurb.cam.v4.${n}`;  // v4 persists perspective zoom as well as roll
+const oldCamKey = n => `nurb.cam.v3.${n}`;
+const legacyCamKey = n => `nurb.cam.v2.${n}`;
 let saveTimer = null;
 function saveCamera(name, state) {
   if (name) localStorage.setItem(camKey(name), JSON.stringify(state));
@@ -2443,7 +2512,7 @@ function saveCamera(name, state) {
 function queueCameraSave() {
   if (!current || !controls) return;
   const name = current;
-  const state = { p: camera.position.toArray(), t: controls.target.toArray(), u: camera.up.toArray() };
+  const state = { p: camera.position.toArray(), t: controls.target.toArray(), u: camera.up.toArray(), f: camera.fov };
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => saveCamera(name, state), 250);
 }
@@ -2464,17 +2533,20 @@ function sane(p, t, box) {
 
 function restoreCamera(name, box) {
   try {
-    const s = JSON.parse(localStorage.getItem(camKey(name)) || localStorage.getItem(oldCamKey(name)));
+    const s = JSON.parse(localStorage.getItem(camKey(name))
+      || localStorage.getItem(oldCamKey(name)) || localStorage.getItem(legacyCamKey(name)));
     if (!s) return false;
     const p = new THREE.Vector3().fromArray(s.p);
     const t = new THREE.Vector3().fromArray(s.t);
-    if (!sane(p, t, box)) return false;
+    const fov = s.f === undefined ? null : Number(s.f);
+    if (!sane(p, t, box) || (fov !== null && (!Number.isFinite(fov) || fov <= 0 || fov >= 180))) return false;
     cameraTransition = null;
     camera.position.copy(p);
     controls.target.copy(t);
     if (Array.isArray(s.u) && s.u.length === 3) camera.up.fromArray(s.u).normalize();
     else camera.up.copy(Math.abs(p.clone().sub(t).normalize().z) > .999
       ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1));
+    if (fov !== null) camera.fov = fov;
     // frame()'s clipping planes for this part, not whatever the last part left behind.
     const size = box.getSize(new THREE.Vector3());
     const span = Math.max(size.x, size.y, size.z) || 10;
@@ -2530,10 +2602,11 @@ function frame(box, from, preserveDirection = false) {
 }
 
 function fitCurrentView() {
-  if (!currentFrameBox || currentFrameBox.isEmpty()) return;
+  if (spaceMouse?.moving || !currentFrameBox || currentFrameBox.isEmpty()) return false;
   frame(currentFrameBox, null, true);
   document.getElementById('reframe').style.display = 'none';
   queueCameraSave();
+  return true;
 }
 
 // ---- loading ----
@@ -2737,6 +2810,10 @@ async function paint(name, { keepCamera }) {
   // same way once it is fixed. There is no camera to keep in either case, so keeping it
   // leaves the camera at the origin and paints a blank canvas over a perfectly good mesh.
   const keep = keepCamera && framed === name;
+  if (!keep) {
+    camera.fov = DEFAULT_CAMERA_FOV;
+    camera.updateProjectionMatrix();
+  }
   if (view) {
     frame(box, view);                       // asked for a named view: no saved camera
     reframe.style.display = 'none';

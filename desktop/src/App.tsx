@@ -1022,6 +1022,26 @@ function App() {
   }, [frame, loadedFrame, selectedPart, active, variantRequestVersion]);
   useEffect(postPart, [postPart]);
 
+  // Keep SpaceMouse navigation attached to the app while the user works in the rail
+  // or chat. An iframe's own blur also fires for those ordinary in-window clicks, so
+  // the viewer follows the native window's focus instead when it is embedded.
+  useEffect(() => {
+    if (!frame || loadedFrame?.key !== frame.key) return;
+    const postFocus = (focused: boolean) => frameRef.current?.contentWindow?.postMessage(
+      { type: "nurb:focus", focused },
+      frame.key,
+    );
+    const focused = () => postFocus(true);
+    const blurred = () => postFocus(false);
+    postFocus(document.hasFocus());
+    window.addEventListener("focus", focused);
+    window.addEventListener("blur", blurred);
+    return () => {
+      window.removeEventListener("focus", focused);
+      window.removeEventListener("blur", blurred);
+    };
+  }, [frame, loadedFrame]);
+
   if (ready !== true) {
     // The status check settles in well under a second; until then the window
     // shows the app background, never a flash of the setup screen.
