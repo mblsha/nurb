@@ -20,7 +20,7 @@ nurb turns the AI you already pay for into a CAD partner for 3D printing. You de
 
 **"Will it hold?" gets a number.** Click the stress button, and a voxel simulation shows where the load concentrates, how far the part sags, and the weight it breaks at, quoted against layer adhesion because that is where FDM prints actually fail.
 
-**Parts that fit the real world.** Scan a real object with your phone or measure a downloaded model, record the dimensions that matter, and nurb refuses to let the AI guess them. A card with a target mesh gets deviation reports in both directions, so added material is caught as loudly as missing material.
+**Parts that fit the real world.** Scan a real object with your phone or measure a downloaded model, record the dimensions that matter, and nurb refuses to let the AI guess them. Reconstruct an STL as editable CAD, overlay the original, and inspect surface differences in both directions with a tolerance that allows small faceting errors.
 
 **Real CAD underneath.** Parts are true B-rep solids on the OCCT kernel, the same math as commercial CAD, not meshes. Chamfers and fillets are real operations, and STEP export means the part opens in Fusion or FreeCAD.
 
@@ -55,6 +55,21 @@ Open the app (or your agent in a terminal) and talk:
 The AI does the rest: reads the design doctrine, creates the project, models the part, runs the printability checks, and opens the live viewer. When it looks right: drag the sliders if you want, click `3mf`, print.
 
 A project is any directory with a `parts/` folder. No init step. New projects are born double-clickable: `viewer.command` opens the viewer from Finder.
+
+## Rebuild an STL as editable CAD
+
+Choose **new from STL…** in the desktop app, select the reference, and confirm its units and dimensions. STL stores triangle coordinates without declaring a unit. The app copies the original into the project and marks the first shape as a bounding-box draft. Choose **Rebuild as editable CAD** to prepare the reconstruction request in chat; the app leaves it for you to send. The equivalent CLI command is:
+
+```bash
+nurb new bracket --from original.stl --units mm --tolerance 0.15
+nurb dev
+```
+
+Open **compare** in the viewer to add, change or remove a reference, toggle its overlay, adjust the accepted surface distance in mm, and inspect the CAD or reference deviation map. The panel reports unsigned distances and estimated sampled coverage within tolerance in both directions. A separate status says whether any sampled deviation exceeds the tolerance, even when coverage rounds to 100%. The color scale stays fixed in millimetres while geometry changes unless you select automatic scaling, and the worst-region controls focus the camera on a discrepancy. `nurb compare bracket` prints the same measurements; `nurb compare bracket --json` returns the full evidence, sample counts and bounded worst regions for an agent.
+
+An STL's flat triangles approximate curved source geometry. A tolerance band lets an analytic cylinder match a faceted cylinder without reproducing every polygon. It changes which differences count as acceptable; it does not smooth the reference or alter the CAD. The comparison engine chooses a finer tessellation budget when the acceptance tolerance requires it. `nurb scan --tolerance` separately controls simplification of extracted section polylines. Phone scans also carry capture uncertainty, so a close mesh comparison alone does not prove a physical fit.
+
+The part card stores `target = { file, units, tolerance_mm, transform }`. New reference projects store identity alignment and keep the draft in the reference's coordinate frame. The row-major 4×4 transform maps the reference, after unit conversion, into CAD coordinates; preserve it while rebuilding so model changes remain measurable. In the viewer, preview original or centered coordinates before applying them, or enter a deliberate translation and rotation. The CLI equivalents are `--alignment stored|identity|center` and `--save-alignment`; naming the card's reference again with `--against` preserves its saved units, tolerance and transform. Use `nurb scan original.stl --units mm --json --section z --section x:20mm` for complete section loops, fit residuals and bounds without scraping rounded terminal output. See the tested [reverse-engineering examples](examples/reverse_engineering/README.md) for coarse curvature, an offset coordinate frame, holes and a localized functional defect.
 
 ## How a part works
 
