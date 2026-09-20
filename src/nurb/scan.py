@@ -269,11 +269,14 @@ def analytic_inspection(shape, sections=()):
             delta = point - axis.position
             radial = delta - axis.direction * delta.dot(axis.direction)
             surface = BRepAdaptor_Surface(face.wrapped)
+            radius = face.radius
+            if radius is None:
+                radius = surface.Cylinder().Radius()
             full = bool(np.isclose(surface.LastUParameter() - surface.FirstUParameter(), 2 * np.pi))
             interior = face.normal_at(point).dot(radial) < 0
             record.update({
                 "origin_mm": xyz(axis.position), "direction": xyz(axis.direction),
-                "radius_mm": float(face.radius),
+                "radius_mm": float(radius),
                 "surface": "bore" if interior and full else "concave cylinder" if interior else "exterior",
                 "closed_circumference": full,
             })

@@ -2,13 +2,14 @@
 
 import asyncio
 import json
+import math
 import threading
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import trimesh
-from build123d import Box, Cylinder, Pos, export_brep, export_step
+from build123d import Box, Cylinder, Face, Pos, export_brep, export_step
 
 from nurb import checks, cli, compare, scan
 from nurb.server import Server
@@ -265,6 +266,21 @@ def test_analytic_summary_keeps_exact_cylinder_and_hole_section(tmp_path, monkey
     assert section["area_mm2"] == pytest.approx(400 - 9 * np.pi)
     assert section["faces"][0]["hole_count"] == 1
     assert all("points_mm" not in feature for feature in result["sections"][0]["features"])
+
+
+def test_analytic_summary_reads_trimmed_cylinder_radius_from_cad_adaptor():
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+    from OCP.Geom import Geom_CylindricalSurface, Geom_RectangularTrimmedSurface
+    from OCP.gp import gp_Ax3, gp_Dir, gp_Pnt
+
+    cylinder = Geom_CylindricalSurface(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 11)
+    trimmed = Geom_RectangularTrimmedSurface(cylinder, 0, 2 * math.pi, 0, 5)
+    face = Face(BRepBuilderAPI_MakeFace(trimmed, 1e-7).Face())
+
+    assert face.radius is None
+    analytic = scan.analytic_inspection(face)
+    assert analytic["faces"][0]["radius_mm"] == pytest.approx(11)
+    assert analytic["faces"][0]["closed_circumference"] is True
 
 
 def test_cli_regions_and_datum_use_same_persisted_settings(tmp_path, monkeypatch, capsys):
