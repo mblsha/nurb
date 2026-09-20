@@ -662,7 +662,7 @@ def test_viewer_discards_a_ghost_loaded_for_a_replaced_mesh_group():
 
     viewer = server_mod.VIEWER.read_text(encoding="utf-8")
     ghost = viewer.split("async function ghostAttach", 1)[1].split(
-        "// ---- axis triad ----", 1
+        "// ---- orientation cube ----", 1
     )[0]
     assert "const group = mesh;" in ghost
     assert "mesh !== group" in ghost

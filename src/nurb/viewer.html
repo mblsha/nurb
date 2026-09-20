@@ -89,7 +89,7 @@
      ResizeObserver, which calls setSize() again -- a resize loop that flickers. */
   canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
   /* The canvas is appended last, so overlays need to be lifted above it. */
-  #hud, #err, #tools, #empty, #checks, #nogl, #platecap, #building { z-index: 1; }
+  #hud, #err, #tools, #empty, #checks, #nogl, #platecap, #building, #viewcube { z-index: 1; }
   #hud {
     position: absolute; left: 16px; bottom: 14px; color: var(--dim);
     font-size: 11px; pointer-events: none; line-height: 1.7;
@@ -365,6 +365,35 @@
                         border-radius: 9px; box-shadow: 0 4px 16px rgba(0,0,0,.35);
                         backdrop-filter: blur(10px); }
   #platecap.open .pickmenu { display: flex; }
+  /* The cube is painted by the main renderer underneath this input surface. Keeping
+     one WebGL context matters in the desktop webview, where contexts are scarce. */
+  #viewcube { position: absolute; right: 10px; bottom: 36px; width: 108px; height: 132px;
+              padding: 2px; border: 1px solid rgba(70,77,89,.8); border-radius: 11px;
+              box-shadow: 0 12px 28px rgba(0,0,0,.23), inset 0 1px rgba(255,255,255,.035);
+              pointer-events: none; }
+  #viewcubehit { width: 102px; height: 102px; border-radius: 8px; outline: none;
+                 pointer-events: auto; touch-action: none; }
+  #viewcubehit:focus-visible { box-shadow: inset 0 0 0 2px var(--accent),
+                               0 0 0 2px rgba(110,231,168,.16); }
+  #viewcubeactions { position: absolute; width: 1px; height: 1px; overflow: hidden;
+                     clip-path: inset(50%); }
+  #viewcubeactions:focus-within { right: 0; bottom: 134px; width: 280px; height: auto;
+                                  max-height: 220px; overflow: auto; clip-path: none;
+                                  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+                                  gap: 3px; padding: 5px; border: 1px solid var(--line);
+                                  border-radius: 9px; background: rgba(29,32,39,.97);
+                                  box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+  #viewcubeactions button { min-width: 0; padding: 4px 6px; overflow: hidden;
+                            color: var(--dim); font-size: 9px; text-overflow: ellipsis;
+                            white-space: nowrap; pointer-events: auto; }
+  #viewcubeactions button:focus-visible { color: var(--accent); border-color: #456955; }
+  #viewcubefit { display: block; width: calc(100% - 8px); height: 22px; margin: 2px 4px 0;
+                 padding: 0; border-radius: 5px; color: var(--dim); background: rgba(29,32,39,.94);
+                 font: 700 8px "JetBrains Mono", ui-monospace, monospace; letter-spacing: .1em;
+                 pointer-events: auto; }
+  #viewcubefit:hover, #viewcubefit:focus-visible { color: var(--accent); border-color: #456955; }
+  body.bare #viewcube, body.nogl #viewcube, body.noparts #viewcube { display: none; }
+  @media (max-height: 300px) { #viewcube { transform: scale(.78); transform-origin: right bottom; } }
   #platecap .pickmenu button { justify-content: flex-start; }
   #params h2 .spin { margin-left: 7px; opacity: 0; transition: opacity .12s .25s; }
   body.stale #params h2 .spin { opacity: 1; }
@@ -548,7 +577,7 @@
   body.noparts #tools { display: none; }
 </style>
 </head>
-<body>
+<body class="noparts">
 <!-- Nucleo icons, inlined as symbols so the viewer stays offline. Strokes are
      currentColor: an icon is tinted by the text color of whatever holds it. -->
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
@@ -593,6 +622,14 @@
 </div>
 <main>
   <div id="dragstrip"></div>
+  <div id="viewcube" aria-label="Canonical view controls">
+    <div id="viewcubehit" tabindex="0" role="application"
+         aria-keyshortcuts="1 2 3 4 5 6 7 F"
+         aria-label="View cube. Select a face, edge, or corner to orient the part. Select an aligned face again to flip vertical. Keys: 1 front, 2 back, 3 right, 4 left, 5 top, 6 bottom, 7 isometric, F fit."
+         title="Select a face, edge, or corner. Select an aligned face again to flip vertical."></div>
+    <div id="viewcubeactions" role="group" aria-label="Face, edge, and corner views"></div>
+    <button id="viewcubefit" type="button" title="fit the part in the view (F)">FIT</button>
+  </div>
   <div id="empty">
     <div>
       <svg><use href="#i-cube"/></svg>
@@ -708,7 +745,7 @@ let sharedRuns = [];
 // `framed` is the part the camera is currently pointed at, which is not `current`: a
 // part becomes current the moment it is selected and only gets a camera once its
 // geometry lands. Nothing is framed until the first mesh paints.
-let current = null, mesh = null, lastSize = null, framed = null;
+let current = null, mesh = null, lastSize = null, framed = null, currentFrameBox = null;
 
 // A headless render drives this same page, so the scene an agent sees is the scene a
 // human sees. ?view= also means "frame it deterministically", ignoring the saved camera.
@@ -1391,46 +1428,208 @@ compareFile.onchange = async event => {
   }
 };
 
-// ---- axis triad ----
-// Issue #55: a tray's front kept reading as its rear while orbiting. A corner triad
-// pinned to the model axes gives the eye something fixed to hold onto. Its camera
-// orbits the origin in lockstep with the main one, so the triad turns with the part.
-const triad = new THREE.Scene();
-const triadCam = new THREE.PerspectiveCamera(45, 1, 0.1, 20);
-triadCam.up.set(0, 0, 1);
-{
-  const axes = new THREE.AxesHelper(1);
-  axes.setColors(new THREE.Color(0xf87171), new THREE.Color(0x6ee7a8), new THREE.Color(0x60a5fa));
-  triad.add(axes);
-  const label = (text, color, x, y, z) => {
-    const c = document.createElement('canvas');
-    c.width = c.height = 128;
-    const g = c.getContext('2d');
-    g.font = '600 76px ui-monospace, SFMono-Regular, Menlo, monospace';
-    g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillStyle = color;
-    g.fillText(text, 64, 68);
-    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c) }));
-    s.position.set(x, y, z);
-    s.scale.setScalar(0.55);
-    triad.add(s);
-  };
-  label('x', '#f87171', 1.42, 0, 0);
-  label('y', '#6ee7a8', 0, 1.42, 0);
-  label('z', '#60a5fa', 0, 0, 1.42);
+// ---- orientation cube ----
+// Issue #55: the passive axis triad stopped a tray's front from reading as its rear.
+// This replaces it with MAF's useful interaction model:
+// six face targets, twelve edge targets and eight corner targets. It shares the main
+// renderer so the desktop webview still owns only one WebGL context.
+const cubeScene = new THREE.Scene();
+const cubeCamera = new THREE.OrthographicCamera(-1.55, 1.55, 1.55, -1.55, 0.1, 20);
+cubeCamera.position.set(0, 0, 5);
+const cubeRoot = new THREE.Group();
+cubeScene.add(cubeRoot);
+
+function cubeFaceTexture(label, color) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 256;
+  const g = canvas.getContext('2d');
+  g.fillStyle = color; g.fillRect(0, 0, 256, 256);
+  const gradient = g.createLinearGradient(0, 0, 256, 256);
+  gradient.addColorStop(0, 'rgba(255,255,255,.16)');
+  gradient.addColorStop(.55, 'rgba(255,255,255,0)');
+  gradient.addColorStop(1, 'rgba(0,0,0,.28)');
+  g.fillStyle = gradient; g.fillRect(0, 0, 256, 256);
+  g.strokeStyle = 'rgba(230,232,236,.34)'; g.lineWidth = 5; g.strokeRect(4, 4, 248, 248);
+  const lines = label.split('\n');
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = '#e6e8ec'; g.font = '700 30px ui-monospace, SFMono-Regular, Menlo, monospace';
+  g.fillText(lines[0], 128, lines.length > 1 ? 112 : 128);
+  if (lines[1]) {
+    g.fillStyle = '#9aa2b1'; g.font = '700 23px ui-monospace, SFMono-Regular, Menlo, monospace';
+    g.fillText(lines[1], 128, 151);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
 }
-const TRIAD = { size: 100, pad: 10 };
-function renderTriad() {
-  if (bare) return;   // headless stills document the part, not the viewer chrome
-  // 45deg fov at this distance keeps the labels inside the inset from every angle.
-  triadCam.position.copy(camera.position).sub(controls.target).setLength(4.2);
-  triadCam.lookAt(0, 0, 0);
+
+const cubeFaces = [
+  ['RIGHT\n+X', '#543d42'], ['LEFT\n−X', '#3d3038'],
+  ['BACK\n+Y', '#31513c'], ['FRONT\n−Y', '#253c30'],
+  ['TOP\n+Z', '#285851'], ['BOTTOM\n−Z', '#243633'],
+];
+const cubeGeometry = new THREE.BoxGeometry(1.35, 1.35, 1.35);
+cubeRoot.add(new THREE.Mesh(cubeGeometry, cubeFaces.map(([label, color]) =>
+  new THREE.MeshBasicMaterial({ map: cubeFaceTexture(label, color) }))));
+cubeRoot.add(new THREE.LineSegments(new THREE.EdgesGeometry(cubeGeometry),
+  new THREE.LineBasicMaterial({ color: 0xaeb6c4, transparent: true, opacity: .56 })));
+
+function cubeTargetSpecs() {
+  const specs = [];
+  for (let axis = 0; axis < 3; axis++) for (const sign of [-1, 1]) {
+    const direction = [0, 0, 0], dimensions = [.78, .78, .78];
+    direction[axis] = sign; dimensions[axis] = .16;
+    specs.push({ direction, dimensions });
+  }
+  for (let zeroAxis = 0; zeroAxis < 3; zeroAxis++) {
+    const firstAxis = (zeroAxis + 1) % 3, secondAxis = (zeroAxis + 2) % 3;
+    for (const first of [-1, 1]) for (const second of [-1, 1]) {
+      const direction = [0, 0, 0], dimensions = [.28, .28, .28];
+      direction[firstAxis] = first; direction[secondAxis] = second; dimensions[zeroAxis] = .76;
+      specs.push({ direction, dimensions });
+    }
+  }
+  for (const x of [-1, 1]) for (const y of [-1, 1]) for (const z of [-1, 1])
+    specs.push({ direction: [x, y, z], dimensions: [.3, .3, .3] });
+  return specs;
+}
+
+const cubeTargets = cubeTargetSpecs().map(({ direction, dimensions }) => {
+  const target = new THREE.Mesh(new THREE.BoxGeometry(...dimensions),
+    new THREE.MeshBasicMaterial({ color: 0x6ee7a8, transparent: true, opacity: 0,
+      depthTest: false, depthWrite: false }));
+  target.position.fromArray(direction).multiplyScalar(.7);
+  target.userData.direction = direction;
+  target.renderOrder = 5;
+  cubeRoot.add(target);
+  return target;
+});
+
+function cubeDirectionName(direction) {
+  const names = [];
+  if (direction[2]) names.push(direction[2] > 0 ? 'top' : 'bottom');
+  if (direction[1]) names.push(direction[1] > 0 ? 'back' : 'front');
+  if (direction[0]) names.push(direction[0] > 0 ? 'right' : 'left');
+  return `${names.join(' ')} ${names.length === 1 ? 'view' : names.length === 2 ? 'edge' : 'corner'}`;
+}
+
+function cubeKeyDirection(key) {
+  return ({
+    1: [0, -1, 0], 2: [0, 1, 0], 3: [1, 0, 0], 4: [-1, 0, 0],
+    5: [0, 0, 1], 6: [0, 0, -1], 7: [1, -1, 1],
+  })[key] || null;
+}
+
+function cubeCanonicalView(cam, target, direction, minimumDistance = 0) {
+  const viewDirection = new THREE.Vector3(...direction).normalize();
+  const distance = Math.max(cam.position.distanceTo(target), minimumDistance);
+  const position = target.clone().addScaledVector(viewDirection, distance);
+  const currentDirection = cam.position.clone().sub(target).normalize();
+  const currentScreenUp = new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion);
+  const preferredUp = Math.abs(viewDirection.z) > .88
+    ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+  const baseUp = preferredUp.addScaledVector(viewDirection, -preferredUp.dot(viewDirection)).normalize();
+  const candidates = [0, 1, 2, 3].map(quarterTurn => {
+    const up = baseUp.clone().applyAxisAngle(viewDirection, quarterTurn * Math.PI / 2).normalize();
+    const orientation = new THREE.Quaternion().setFromRotationMatrix(
+      new THREE.Matrix4().lookAt(position, target, up));
+    return { quarterTurn, up, orientation, angle: cam.quaternion.angleTo(orientation),
+      affinity: up.dot(currentScreenUp) };
+  }).sort((a, b) => Math.abs(a.angle - b.angle) > 1e-9 ? a.angle - b.angle : b.affinity - a.affinity);
+  let selected = candidates[0];
+  const cardinal = direction.filter(component => Math.abs(component) > 1e-6).length === 1;
+  if (cardinal && currentDirection.dot(viewDirection) > 1 - 1e-10 && selected.angle < 1e-5)
+    selected = candidates.find(candidate => candidate.quarterTurn === (selected.quarterTurn + 2) % 4) || selected;
+  return { position, up: selected.up, orientation: selected.orientation, distance };
+}
+
+let cameraTransition = null;
+function startCubeView(direction) {
+  if (!controls) return;
+  const sphere = currentFrameBox?.getBoundingSphere(new THREE.Sphere());
+  const minimumDistance = sphere
+    ? sphere.radius * 1.4 + controls.target.distanceTo(sphere.center) : 0;
+  const selected = cubeCanonicalView(camera, controls.target, direction, minimumDistance);
+  cameraTransition = { started: performance.now(), duration: 380,
+    target: controls.target.clone(), distance: selected.distance,
+    fromOrientation: camera.quaternion.clone(), toOrientation: selected.orientation,
+    toPosition: selected.position, toUp: selected.up };
+}
+
+function updateCameraTransition(now) {
+  if (!cameraTransition) return;
+  const t = cameraTransition;
+  const progress = Math.min(1, Math.max(0, (now - t.started) / t.duration));
+  const eased = progress < .5 ? 4 * progress ** 3 : 1 - (-2 * progress + 2) ** 3 / 2;
+  const orientation = new THREE.Quaternion().slerpQuaternions(t.fromOrientation, t.toOrientation, eased);
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(orientation);
+  camera.position.copy(t.target).addScaledVector(forward, -t.distance);
+  camera.up.set(0, 1, 0).applyQuaternion(orientation).normalize();
+  camera.quaternion.copy(orientation);
+  controls.update();
+  if (progress === 1) {
+    camera.position.copy(t.toPosition); camera.up.copy(t.toUp); camera.lookAt(t.target);
+    controls.update(); cameraTransition = null; queueCameraSave();
+  }
+}
+
+const cubeHit = document.getElementById('viewcubehit');
+const cubeRaycaster = new THREE.Raycaster(), cubePointer = new THREE.Vector2();
+let cubeHovered = null;
+const cubeActions = document.getElementById('viewcubeactions');
+for (const { direction } of cubeTargetSpecs()) {
+  const action = document.createElement('button');
+  action.type = 'button'; action.textContent = cubeDirectionName(direction);
+  action.onclick = () => startCubeView(direction);
+  cubeActions.appendChild(action);
+}
+function cubeTargetAt(event) {
+  const rect = cubeHit.getBoundingClientRect();
+  cubePointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1);
+  cubeRoot.updateMatrixWorld(true);
+  cubeRaycaster.setFromCamera(cubePointer, cubeCamera);
+  return cubeRaycaster.intersectObjects(cubeTargets, false)[0]?.object || null;
+}
+cubeHit.onpointermove = event => {
+  const target = cubeTargetAt(event);
+  if (target === cubeHovered) return;
+  if (cubeHovered) cubeHovered.material.opacity = 0;
+  cubeHovered = target;
+  if (cubeHovered) cubeHovered.material.opacity = .32;
+  cubeHit.style.cursor = cubeHovered ? 'pointer' : 'default';
+};
+cubeHit.onpointerleave = () => {
+  if (cubeHovered) cubeHovered.material.opacity = 0;
+  cubeHovered = null; cubeHit.style.cursor = 'default';
+};
+cubeHit.onclick = event => {
+  const target = cubeTargetAt(event);
+  if (target) startCubeView(new THREE.Vector3(...target.userData.direction).normalize().toArray());
+};
+cubeHit.onkeydown = event => {
+  const direction = cubeKeyDirection(event.key);
+  if (event.key.toLowerCase() === 'f') fitCurrentView();
+  else if (direction) startCubeView(direction);
+  else return;
+  event.preventDefault();
+};
+document.getElementById('viewcubefit').onclick = () => fitCurrentView();
+if (controls) controls.addEventListener('start', () => { cameraTransition = null; });
+
+function renderViewCube() {
+  if (bare || !cubeHit.offsetParent) return;   // headless stills document the part, not its chrome
+  cubeRoot.quaternion.copy(camera.quaternion).invert();
+  const canvasRect = renderer.domElement.getBoundingClientRect();
+  const rect = cubeHit.getBoundingClientRect();
+  const x = Math.round(rect.left - canvasRect.left), y = Math.round(canvasRect.bottom - rect.bottom);
+  const width = Math.round(rect.width), height = Math.round(rect.height);
   renderer.autoClear = false;
   renderer.clearDepth();
   renderer.setScissorTest(true);
-  renderer.setScissor(lastW - TRIAD.size - TRIAD.pad, TRIAD.pad, TRIAD.size, TRIAD.size);
-  renderer.setViewport(lastW - TRIAD.size - TRIAD.pad, TRIAD.pad, TRIAD.size, TRIAD.size);
-  renderer.render(triad, triadCam);
+  renderer.setScissor(x, y, width, height);
+  renderer.setViewport(x, y, width, height);
+  renderer.render(cubeScene, cubeCamera);
   renderer.setScissorTest(false);
   renderer.setViewport(0, 0, lastW, lastH);
   renderer.autoClear = true;
@@ -1450,9 +1649,10 @@ if (renderer) {
   resize();
   (function tick() {
     requestAnimationFrame(tick);
+    updateCameraTransition(performance.now());
     controls.update();
     renderer.render(scene, camera);
-    renderTriad();
+    renderViewCube();
   })();
 }
 
@@ -2234,17 +2434,20 @@ if (cutting) {  // a ?cut= URL arrives with the section already open, so the pil
 
 // ---- camera persistence ----
 // A rebuild is a geometry swap, never a camera reset. Reloads restore per part.
-const camKey = n => `nurb.cam.v2.${n}`;  // v2: parts now sit on the plate, not under it
+const camKey = n => `nurb.cam.v3.${n}`;  // v3 persists roll as well as position and target
+const oldCamKey = n => `nurb.cam.v2.${n}`;
 let saveTimer = null;
-if (controls) controls.addEventListener('change', () => {
-  if (!current) return;
+function saveCamera(name, state) {
+  if (name) localStorage.setItem(camKey(name), JSON.stringify(state));
+}
+function queueCameraSave() {
+  if (!current || !controls) return;
+  const name = current;
+  const state = { p: camera.position.toArray(), t: controls.target.toArray(), u: camera.up.toArray() };
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    localStorage.setItem(camKey(current), JSON.stringify({
-      p: camera.position.toArray(), t: controls.target.toArray(),
-    }));
-  }, 250);
-});
+  saveTimer = setTimeout(() => saveCamera(name, state), 250);
+}
+if (controls) controls.addEventListener('change', queueCameraSave);
 
 // True when this viewpoint can plausibly see the part: camera outside the solid,
 // target near it, distance in a sane band. A saved camera can go stale when the
@@ -2261,13 +2464,17 @@ function sane(p, t, box) {
 
 function restoreCamera(name, box) {
   try {
-    const s = JSON.parse(localStorage.getItem(camKey(name)));
+    const s = JSON.parse(localStorage.getItem(camKey(name)) || localStorage.getItem(oldCamKey(name)));
     if (!s) return false;
     const p = new THREE.Vector3().fromArray(s.p);
     const t = new THREE.Vector3().fromArray(s.t);
     if (!sane(p, t, box)) return false;
+    cameraTransition = null;
     camera.position.copy(p);
     controls.target.copy(t);
+    if (Array.isArray(s.u) && s.u.length === 3) camera.up.fromArray(s.u).normalize();
+    else camera.up.copy(Math.abs(p.clone().sub(t).normalize().z) > .999
+      ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1));
     // frame()'s clipping planes for this part, not whatever the last part left behind.
     const size = box.getSize(new THREE.Vector3());
     const span = Math.max(size.x, size.y, size.z) || 10;
@@ -2295,7 +2502,8 @@ function viewDir(from) {
   return len ? v.map(c => c / len) : null;
 }
 
-function frame(box, from) {
+function frame(box, from, preserveDirection = false) {
+  cameraTransition = null;
   const size = box.getSize(new THREE.Vector3());
   const mid = box.getCenter(new THREE.Vector3());
   const span = Math.max(size.x, size.y, size.z) || 10;
@@ -2303,18 +2511,29 @@ function frame(box, from) {
   // headroom that orbiting comfortably does, so it gets a tighter fit.
   const pad = from ? 1.45 : 2.1;
   const dist = span / (2 * Math.tan((camera.fov * Math.PI / 180) / 2)) * pad;
-  const dir = viewDir(from) || VIEWS.iso;
+  const dir = preserveDirection && controls
+    ? camera.position.clone().sub(controls.target).normalize().toArray()
+    : viewDir(from) || VIEWS.iso;
   // Straight down is degenerate in a Z-up scene: the view direction is parallel to the
   // camera's up vector, and the orientation comes out undefined rather than wrong. With
   // computed directions in play, near-vertical counts: a normal a hair off +Z would
   // otherwise flicker between orientations.
-  camera.up.set(0, 0, 1);
-  if (Math.abs(dir[0]) < 1e-4 && Math.abs(dir[1]) < 1e-4) camera.up.set(0, 1, 0);
+  if (!preserveDirection) {
+    camera.up.set(0, 0, 1);
+    if (Math.abs(dir[0]) < 1e-4 && Math.abs(dir[1]) < 1e-4) camera.up.set(0, 1, 0);
+  }
   camera.position.set(mid.x + dist * dir[0], mid.y + dist * dir[1], mid.z + dist * dir[2]);
   controls.target.copy(mid);
   camera.near = span / 100; camera.far = span * 100;
   camera.updateProjectionMatrix();
   controls.update();
+}
+
+function fitCurrentView() {
+  if (!currentFrameBox || currentFrameBox.isEmpty()) return;
+  frame(currentFrameBox, null, true);
+  document.getElementById('reframe').style.display = 'none';
+  queueCameraSave();
 }
 
 // ---- loading ----
@@ -2352,6 +2571,7 @@ function applyJointPoses() {
 // because one only guarantees the mesh is in the scene, not that it has been painted.
 // Set on every exit path including a failed build, or a render of a broken part hangs.
 async function show(name, opts) {
+  cameraTransition = null;
   window.__nurb.ready = false;
   try {
     await paint(name, opts);
@@ -2381,6 +2601,7 @@ async function referencePaint(name, entry, keepCamera) {
       const center = box.getCenter(new THREE.Vector3());
       group.position.set(-center.x, -center.y, -box.min.z);
       box.translate(group.position);
+      currentFrameBox = box.clone();
       if (!keepCamera || framed !== name) frame(box, view);
       framed = name;
     }
@@ -2503,6 +2724,7 @@ async function paint(name, { keepCamera }) {
   const at = plated.getCenter(new THREE.Vector3());
   mesh.position.set(-at.x, -at.y, -plated.min.z);
   const box = bb.clone().translate(mesh.position);
+  currentFrameBox = box.clone();
   const size = box.getSize(new THREE.Vector3()).length();
 
   // Only reframe when the part changed scale enough that the camera is lost.
@@ -2529,7 +2751,7 @@ async function paint(name, { keepCamera }) {
     const lost = !sane(camera.position, controls.target, box);
     reframe.style.display = (jumped || lost) ? 'inline-flex' : 'none';
   }
-  reframe.onclick = () => { frame(box); reframe.style.display = 'none'; };
+  reframe.onclick = () => { frame(box); reframe.style.display = 'none'; queueCameraSave(); };
   // The cut side comes from the camera, so attach only after this part's saved camera
   // has been restored (or its default frame chosen), never from the part just removed.
   sectionAttach(!keep);
