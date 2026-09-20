@@ -301,27 +301,25 @@ def to_mesh(shape, tolerance=0.1, up=(0, 0, 1)):
 
 
 def to_glb(shape, tolerance=0.1, up=(0, 0, 1)):
-    """One GLB. A part is one blob; an assembly keeps its movers as named nodes.
-
-    The scene rides on the compound the same way checks.run reads it: an attribute,
-    not an import, so this file stays ignorant of how assemblies work. The node
-    names are the contract with the viewer -- `joint<i>` for each hinged solid in
-    declaration order, `fixed` for everything static, `context` for obstacles --
-    which is what lets a slider pose a joint client-side without a rebuild.
-    """
+    """One GLB, retaining assembly component identity and the joint posing nodes."""
     scene = getattr(shape, "_nurb_scene", None)
     if scene is None:
         return trimesh.Scene([to_mesh(shape, tolerance, up)]).export(file_type="glb")
-    from .assembly import NODE
-
     out = trimesh.Scene()
-    for i, h in enumerate(scene.hinges):
-        name = NODE.format(i)
-        out.add_geometry(to_mesh(h.solid, tolerance, up), node_name=name, geom_name=name)
-    for name, group in (("fixed", scene.statics), ("context", scene.obstacles)):
-        if group:
-            merged = trimesh.util.concatenate([to_mesh(s, tolerance, up) for s in group])
-            out.add_geometry(merged, node_name=name, geom_name=name)
+    nodes = {component.id: component.node for component in scene.components}
+    for component in scene.components:
+        if component.group:
+            out.graph.update(
+                frame_to=component.node, frame_from=nodes.get(component.parent, out.graph.base_frame),
+                matrix=np.eye(4), metadata={"nurb": component.wire()},
+            )
+            continue
+        out.add_geometry(
+            to_mesh(component.solid, tolerance, up),
+            node_name=component.node, geom_name=component.node,
+            parent_node_name=nodes.get(component.parent),
+            metadata={"nurb": component.wire()},
+        )
     return out.export(file_type="glb")
 
 

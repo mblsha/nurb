@@ -36,8 +36,14 @@ export function referenceFileName(source: string): string {
   return source.split(/[\\/]/).pop() ?? source;
 }
 
+export function referenceMeshSuffix(source: string): string | null {
+  return referenceFileName(source).toLowerCase().match(/\.(stl|ply(?:\.gz)?)$/)?.[0] ?? null;
+}
+
 export function referenceProjectName(source: string): string {
-  return referenceFileName(source).replace(/\.stl$/i, "").replace(/^\.+/, "").trim() || "STL reconstruction";
+  const filename = referenceFileName(source);
+  const suffix = referenceMeshSuffix(source);
+  return (suffix ? filename.slice(0, -suffix.length) : filename).replace(/^\.+/, "").trim() || "Mesh reconstruction";
 }
 
 export function referenceDimensions(info: ReferenceInfo, units: ReferenceUnit): number[] {

@@ -42,11 +42,13 @@ LABELS = {
     "build_volume": "too big",
 }
 
+ASSEMBLY_LABELS = {"clearance": "fit clearance"}
+
 
 def label(rule):
     """What to call a rule on screen. Falls back to the identifier, which is honest:
     a rule with no label is a gap to fill, not a reason to show nothing."""
-    return LABELS.get(rule, rule)
+    return LABELS.get(rule, ASSEMBLY_LABELS.get(rule, rule))
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,8 @@ class Finding:
     value: float | None = None
     where: tuple | None = None
     plain: str | None = None
+    components: tuple | None = None
+    measurements: dict | None = None
 
     @property
     def label(self):
@@ -123,14 +127,17 @@ def rule(name):
 
 
 def run(shape, ctx=None, only=None, stop=None):
-    # An assembly's compound carries its recorded joints, and motion is the only
-    # thing worth judging about it: overhang and min_wall on an assembled scene
-    # would report confident nonsense about parts that each checked clean alone.
+    # Assembly fit and motion are distinct from manufacturing an individual part.
     scene = getattr(shape, "_nurb_scene", None)
     if scene is not None:
-        from .assembly import sweep
+        from .assembly import check_clearances, sweep
 
-        return sweep(scene, stop)
+        found = []
+        if not only or "clearance" in only:
+            found.extend(check_clearances(scene, stop))
+        if not only or "motion" in only:
+            found.extend(sweep(scene, stop))
+        return found
     ctx = ctx or Context()
     found = []
     for name, fn in RULES.items():

@@ -56,20 +56,22 @@ The AI does the rest: reads the design doctrine, creates the project, models the
 
 A project is any directory with a `parts/` folder. No init step. New projects are born double-clickable: `viewer.command` opens the viewer from Finder.
 
-## Rebuild an STL as editable CAD
+## Rebuild a mesh as editable CAD
 
-Choose **new from STL…** in the desktop app, select the reference, and confirm its units and dimensions. STL stores triangle coordinates without declaring a unit. The app copies the original into the project and marks the first shape as a bounding-box draft. Choose **Rebuild as editable CAD** to prepare the reconstruction request in chat; the app leaves it for you to send. The equivalent CLI command is:
+Choose **new from mesh…** in the desktop app, select the reference, and confirm its units and dimensions. STL stores triangle coordinates without declaring a unit. The app copies the original into the project and marks the first shape as a bounding-box draft. Choose **Rebuild as editable CAD** to prepare the reconstruction request in chat; the app leaves it for you to send. The equivalent CLI command is:
 
 ```bash
 nurb new bracket --from original.stl --units mm --tolerance 0.15
 nurb dev
 ```
 
-Open **compare** in the viewer to add, change or remove a reference, toggle its overlay, adjust the accepted surface distance in mm, and inspect the CAD or reference deviation map. The panel reports unsigned distances and estimated sampled coverage within tolerance in both directions. A separate status says whether any sampled deviation exceeds the tolerance, even when coverage rounds to 100%. The color scale stays fixed in millimetres while geometry changes unless you select automatic scaling, and the worst-region controls focus the camera on a discrepancy. `nurb compare bracket` prints the same measurements; `nurb compare bracket --json` returns the full evidence, sample counts and bounded worst regions for an agent.
+Triangulated PLY references can also be gzip-compressed as `.ply.gz`, including uppercase extensions. `nurb scan`, `nurb compare`, `nurb new --from`, and the viewer's reference picker read the compressed file directly and keep its original bytes in the project. Confirm the source units as with an uncompressed PLY. The viewer accepts files up to 48 MiB on disk; all compressed PLY inputs have a 256 MiB expanded-data limit. Simplify larger meshes before importing. Compression does not turn a point cloud or Gaussian splat into a triangle mesh.
+
+Open **compare** in the viewer to add, change or remove a reference and switch among model, reference, overlay, deviation, matched side-by-side, and filled section views. The section view cuts both bodies on one part-frame plane and colors shared, CAD-only, and reference-only material; open or ambiguous mesh contours stay outlined instead of being guessed solid. The panel reports unsigned distances and estimated sampled coverage within tolerance in both directions. A separate status says whether any sampled deviation exceeds the tolerance, even when coverage rounds to 100%. The color scale stays fixed in millimetres while geometry changes unless you select automatic scaling, and the worst-region controls focus the camera on a discrepancy. A named box or assembly component can be saved as an inspection region, keeping its local measurements beside the whole-model result. `nurb compare bracket --region 'camera=20,25,18:47,50,36' --save-regions` records one from the CLI; `nurb compare bracket --json` returns the global and regional evidence, sample counts, and bounded worst regions for an agent.
 
 An STL's flat triangles approximate curved source geometry. A tolerance band lets an analytic cylinder match a faceted cylinder without reproducing every polygon. It changes which differences count as acceptable; it does not smooth the reference or alter the CAD. The comparison engine chooses a finer tessellation budget when the acceptance tolerance requires it. `nurb scan --tolerance` separately controls simplification of extracted section polylines. Phone scans also carry capture uncertainty, so a close mesh comparison alone does not prove a physical fit.
 
-The part card stores `target = { file, units, tolerance_mm, transform }`. New reference projects store identity alignment and keep the draft in the reference's coordinate frame. The row-major 4×4 transform maps the reference, after unit conversion, into CAD coordinates; preserve it while rebuilding so model changes remain measurable. In the viewer, preview original or centered coordinates before applying them, or enter a deliberate translation and rotation. The CLI equivalents are `--alignment stored|identity|center` and `--save-alignment`; naming the card's reference again with `--against` preserves its saved units, tolerance and transform. Use `nurb scan original.stl --units mm --json --section z --section x:20mm` for complete section loops, fit residuals and bounds without scraping rounded terminal output. See the tested [reverse-engineering examples](examples/reverse_engineering/README.md) for coarse curvature, an offset coordinate frame, holes and a localized functional defect.
+The part card stores `target = { file, units, tolerance_mm, transform, regions }`. New reference projects store identity alignment and keep the draft in the reference's coordinate frame. The row-major 4×4 transform maps the reference, after unit conversion, into CAD coordinates; preserve it while rebuilding so model changes remain measurable. In the viewer, preview original or centered coordinates before applying them, or align a measured plane, axis, or corresponding landmarks and apply the preview deliberately. The CLI equivalents are `--alignment stored|identity|center`, `--datum JSON`, and `--save-alignment`; naming the card's reference again with `--against` preserves its saved units, tolerance, transform, and regions. Use `nurb scan original.stl --units mm --summary` for compact measurements or add `--json --section z --section x:20mm` for complete section loops and fit residuals. STEP and B-rep inputs report exact analytic planes, cylinders, axes, and section areas. See the tested [reverse-engineering examples](examples/reverse_engineering/README.md) for coarse curvature, an offset coordinate frame, holes and a localized functional defect.
 
 ## How a part works
 
@@ -86,6 +88,8 @@ def hose_adapter(vac_end=57.6, tool_end=35.0, wall=2.4):
 The defaults are the parameters, and that one line is where the viewer's sliders, the tests, and the CLI all come from. The body is [build123d](https://build123d.readthedocs.io) on the OCCT kernel, plus nurb's own vocabulary for the printing-specific moves: `polish` for the chamfer pass, `stand` for a diagonal print stance, `measured` for real-world dimensions, `assembly` for multi-part builds. `nurb api` prints the whole list with signatures.
 
 Because a part is a function, the same part flexes into variants: a card can declare `shelf_3x2` as the shelf with `grid_x = 3`, and every command walks variants like parts, each with its own 3MF and baselines.
+
+An `@assembly` keeps placed parts separate. `use()` places another printable part, `component()` names other returned geometry, and `obstacle()` marks reference hardware that is never exported for printing. The viewer preserves those component identities so each can be hidden or isolated without rebuilding or changing an export. Declare `clearance(mount, camera, minimum=0.2)` to check the current static fit; `hinge()` remains the separate motion check. Fit, reconstruction accuracy, and per-part printability are reported independently.
 
 ## The checks
 
@@ -138,11 +142,11 @@ nurb dev             watch, rebuild, serve the viewer
 nurb build [part]    build once and report size
 nurb check [part]    run the printability rules, --strict for CI
 nurb inspect [part]  faces, normals, concave edges, each finding on its face
-nurb scan <file>     measure a phone scan or a downloaded model (STL/OBJ/GLB/PLY) in mm
-nurb compare [part]  deviation from the card's target mesh, both directions
+nurb scan <file>     measure a mesh or inspect a STEP/B-rep model; --summary is compact
+nurb compare [part]  global and named-region deviation from the reference, both directions
 nurb slice [part]    print time and grams of filament, from the slicer you already have
 nurb stress [part]   where a load stresses the part: peak MPa, sag, margin to breaking
-nurb render [part]   write a PNG, --section cuts it open
+nurb render [part]   capture model/reference/overlay/deviation/side-by-side/section PNGs
 nurb export [part]   write a print-ready 3MF, --formats for STL, STEP or GLB
 nurb rules           print the design doctrine
 nurb api             the vocabulary a part file gets, with signatures

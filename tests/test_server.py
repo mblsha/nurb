@@ -2,9 +2,11 @@
 
 import asyncio
 import base64
+import gzip
 import io
 import json
 import pathlib
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -105,6 +107,67 @@ def test_reference_upload_copies_portably_then_updates_the_card(tmp_path):
     assert target["transform"] is None
     assert client.messages[0]["type"] == "target_reference"
     assert set(client.messages[0]["written"]) == {"file", "units", "tolerance_mm", "transform"}
+
+
+def test_compressed_ply_upload_preserves_compound_extension_and_inspects(tmp_path):
+    from nurb import checks, compare
+
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    client = ReplyClient()
+    body = gzip.compress(trimesh.creation.box(extents=[4, 5, 6]).export(file_type="ply"))
+    asyncio.run(server.command(json.dumps({
+        "type": "target_reference", "name": "thing", "filename": "Phone Scan.PLY.GZ",
+        "units": "cm", "data": base64.b64encode(body).decode(),
+    }), client))
+    part = pathlib.Path(server.queue.get_nowait())
+    target = compare.setting(checks.settings(part))
+    assert target["file"].endswith(".ply.gz")
+    assert "Phone_Scan-" in target["file"]
+    assert (tmp_path / target["file"]).read_bytes() == body
+    entry = server.rebuild(part)
+    assert entry["target"]["dimensions"] == [40, 50, 60]
+    assert entry["target_glb"][:4] == b"glTF"
+    asyncio.run(server.command(json.dumps({"type": "target_inspection", "name": "thing"}), client))
+    response = client.messages[-1]
+    assert response["type"] == "target_inspection"
+    assert "error" not in response
+    assert response["inspection"]["sections"]
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("invalid", "invalid or incomplete gzip"),
+    ("points", "only points.*mesh mode"),
+    ("expanded", "expanded PLY exceeds.*simplify"),
+    ("upload", "48 MiB viewer limit"),
+])
+def test_compressed_ply_upload_failure_preserves_existing_reference(tmp_path, monkeypatch, case, expected):
+    from nurb import scan
+
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    card = tmp_path / "parts" / "thing.md"
+    card.write_text('# thing\n\n```toml\ntarget = "scans/original.stl"\n```\n')
+    before = card.read_bytes()
+    if case == "invalid":
+        body = b"not gzip"
+    elif case == "points":
+        body = gzip.compress(trimesh.points.PointCloud(np.zeros((4, 3))).export(file_type="ply"))
+    elif case == "expanded":
+        monkeypatch.setattr(scan, "PLY_GZIP_LIMIT", 1024)
+        body = gzip.compress(b"0" * 1025)
+    else:
+        monkeypatch.setattr(server, "REFERENCE_LIMIT", 10)
+        body = gzip.compress(b"too large for upload")
+    client = ReplyClient()
+    asyncio.run(server.command(json.dumps({
+        "type": "target_reference", "name": "thing", "filename": "broken.ply.gz",
+        "units": "mm", "data": base64.b64encode(body).decode(),
+    }), client))
+    assert card.read_bytes() == before
+    assert not (tmp_path / "scans").exists()
+    assert server.queue.empty()
+    assert re.search(expected, client.messages[-1]["error"])
 
 
 def test_invalid_reference_upload_preserves_the_existing_card_and_reference(tmp_path):
@@ -975,7 +1038,7 @@ def test_viewer_centers_printed_geometry_without_assembly_context():
     viewer = server_mod.VIEWER.read_text(encoding="utf-8")
     paint = viewer.split("async function paint", 1)[1].split("// Takes a name", 1)[0]
     centering = paint.split("const plated =", 1)[1].split("const size =", 1)[0]
-    assert "c.name !== 'context'" in centering
+    assert "componentInfo(c).role !== 'context'" in centering
     assert "mesh.position.set(-at.x, -at.y, -plated.min.z)" in centering
 
 

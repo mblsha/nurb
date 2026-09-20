@@ -37,7 +37,7 @@ export default function ReferenceProjectDialog({ source, creating, error, onCrea
     <div className="about" onClick={(event) => event.target === event.currentTarget && close()}>
       <form className="about-card reference-project-dialog" role="dialog" aria-modal="true" aria-labelledby="reference-project-title" onSubmit={submit} onKeyDown={(event) => { if (event.key === "Escape") close(); }}>
         <button type="button" className="about-close" title="close" disabled={creating} onClick={close}>×</button>
-        <div className="about-title" id="reference-project-title">New from STL</div>
+        <div className="about-title" id="reference-project-title">New from mesh</div>
         <div className="about-body">
           <p>Keep the original as a reference and rebuild an editable CAD model. Start with a box matching its bounds.</p>
           <div className="reference-file">{referenceFileName(source)}</div>
@@ -51,12 +51,12 @@ export default function ReferenceProjectDialog({ source, creating, error, onCrea
             <option value="in">Inches</option>
           </select>
           <p className="reference-size" aria-live="polite">
-            {info ? `${referenceDimensions(info, units).map((size) => Number(size.toPrecision(6)).toLocaleString(undefined, { maximumSignificantDigits: 6 })).join(" × ")} mm` : readError ? "Dimensions unavailable" : "Reading STL dimensions…"}
+            {info ? `${referenceDimensions(info, units).map((size) => Number(size.toPrecision(6)).toLocaleString(undefined, { maximumSignificantDigits: 6 })).join(" × ")} mm` : readError ? "Dimensions unavailable" : "Reading mesh dimensions…"}
           </p>
-          <p className="reference-hint">STL files do not declare units. Confirm that these dimensions match the original.</p>
+          <p className="reference-hint">Confirm that these dimensions match the original. Choose the units used when exporting the mesh.</p>
           <label className="api-key-label" htmlFor="reference-tolerance">Ignore differences within (mm)</label>
           <input className="api-key-input" id="reference-tolerance" type="number" min={MIN_REFERENCE_TOLERANCE_MM} step="any" value={tolerance} onChange={(event) => setTolerance(event.target.value)} disabled={creating} required />
-          <p className="reference-hint">Allow small differences from the STL's flat triangles. Minimum 0.001 mm. You can adjust this in the comparison panel.</p>
+          <p className="reference-hint">Allow small differences from the mesh's flat triangles. Minimum 0.001 mm. You can adjust this in the comparison panel.</p>
           <p className="reference-hint">Creating the project saves the reference and opens its bounding-box draft. Choose Rebuild as editable CAD beside the part when you are ready to prepare the agent instructions.</p>
           {(readError || error) && <p className="reference-error" role="alert">{readError || error}</p>}
           <div className="settings-actions">

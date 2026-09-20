@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { reconstructionPrompt, referenceDimensions, referenceProjectName, validReferenceTolerance, type ReferenceInfo } from "../src/referenceProject.ts";
+import { reconstructionPrompt, referenceDimensions, referenceMeshSuffix, referenceProjectName, validReferenceTolerance, type ReferenceInfo } from "../src/referenceProject.ts";
 
 test("comparison tolerance accepts the engine minimum and rejects smaller or non-finite values", () => {
   assert.equal(validReferenceTolerance(0.001), true);
@@ -17,10 +17,22 @@ test("small STL dimensions stay millimetres unless the user chooses another unit
   assert.equal(referenceDimensions(info, "in")[0], 50.8);
 });
 
-test("the proposed project name uses only the STL filename", () => {
+test("the proposed project name strips mesh and compressed PLY suffixes", () => {
   assert.equal(referenceProjectName("/downloads/Bracket v2.STL"), "Bracket v2");
   assert.equal(referenceProjectName("C:\\Downloads\\clip.stl"), "clip");
-  assert.equal(referenceProjectName("/downloads/.stl"), "STL reconstruction");
+  assert.equal(referenceProjectName("/downloads/.stl"), "Mesh reconstruction");
+  assert.equal(referenceProjectName("/downloads/Maixcam2.PLY.GZ"), "Maixcam2");
+  assert.equal(referenceProjectName("C:\\Downloads\\phone scan.ply"), "phone scan");
+  assert.equal(referenceProjectName("/downloads/.ply.gz"), "Mesh reconstruction");
+});
+
+test("the native gzip filter accepts compressed PLY but rejects unrelated archives", () => {
+  assert.equal(referenceMeshSuffix("/downloads/scan.PLY.GZ"), ".ply.gz");
+  assert.equal(referenceMeshSuffix("scan.ply"), ".ply");
+  assert.equal(referenceMeshSuffix("scan.STL"), ".stl");
+  for (const path of ["scan.gz", "scan.stl.gz", "scan.ply.gz.backup", "scan.zip"]) {
+    assert.equal(referenceMeshSuffix(path), null);
+  }
 });
 
 test("the reconstruction handoff preserves the comparison contract", () => {

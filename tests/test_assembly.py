@@ -64,6 +64,10 @@ def motion(shape):
     return [f for f in checks.run(shape) if f.rule == "motion"]
 
 
+def test_static_fit_findings_have_a_plain_viewer_label():
+    assert checks.label("clearance") == "fit clearance"
+
+
 def test_an_assembly_builds_to_one_compound_the_existing_pipeline_can_carry(project):
     path = write(project, "rig", FLAP_ASM)
     shape, params, _ = builder.build(path)
@@ -258,7 +262,7 @@ def test_an_assembly_glb_keeps_its_movers_as_named_nodes(project):
     scene = trimesh.load(io.BytesIO(glb), file_type="glb")
     names = set(scene.geometry)
     assert "joint0" in names
-    assert "fixed" in names
+    assert "component_part_1" in names
     # A plain part stays one anonymous blob; nothing downstream should start
     # depending on node names existing for everything.
     write(project, "plate", PLATE)
@@ -304,3 +308,227 @@ def test_a_stop_that_turns_true_interrupts_the_sweep_between_poses(project):
         checks.run(shape, stop=lambda: True)
     # A stop that stays false changes nothing.
     assert [f.rule for f in checks.run(shape, stop=lambda: False)] == ["motion"] * 2
+
+
+def glb_nodes(shape):
+    import json
+    import struct
+
+    glb = builder.to_glb(shape)
+    length = struct.unpack_from("<I", glb, 12)[0]
+    return json.loads(glb[20:20 + length])["nodes"]
+
+
+def test_component_nodes_keep_repeated_uses_and_context_identity(project):
+    write(project, "plate", PLATE)
+    path = write(project, "pair", '''from nurb import *
+
+@assembly
+def pair(offset=20.0):
+    left = use("plate")
+    right = Pos(offset, 0, 0) * use("plate", width=8.0)
+    machine = Pos(0, 0, -5) * obstacle(Box(40, 40, 2), "camera body")
+    return left, right, machine
+''')
+    first, _, _ = builder.build(path)
+    second, _, _ = builder.build(path, overrides={"offset": 30.0})
+    nodes = [n for n in glb_nodes(first) if "mesh" in n]
+    assert [n["name"] for n in nodes] == [
+        "component_plate_1", "component_plate_2", "component_camera_body_1",
+    ]
+    metadata = [n["extras"]["nurb"] for n in nodes]
+    assert metadata == [
+        {"id": "plate_1", "label": "plate", "role": "part"},
+        {"id": "plate_2", "label": "plate", "role": "part"},
+        {"id": "camera_body_1", "label": "camera body", "role": "context"},
+    ]
+    assert [c.wire() for c in second._nurb_scene.components] == metadata
+    assert len(first._nurb_scene.obstacles) == 1
+    assert len(first._nurb_scene.instances) == 2
+    assert first._nurb_scene.instances[1].overrides == (("width", 8.0),)
+
+
+@pytest.mark.parametrize("gap, minimum, failure", [
+    (0.0, 0.0, False), (0.5, 0.5, False), (1.0, 0.5, False),
+    (0.25, 0.5, True), (-0.5, 0.0, True), (-0.5, 0.5, True),
+])
+def test_declared_static_clearance_measures_gaps_and_overlap(project, gap, minimum, failure):
+    path = write(project, "fit", '''from nurb import *
+
+@assembly
+def fit(gap=0.0, minimum=0.0):
+    mount = component(Box(2, 2, 2), "mount")
+    camera = obstacle(Pos(2 + gap, 0, 0) * Box(2, 2, 2), "camera")
+    clearance(mount, "camera", minimum=minimum)
+    return mount, camera
+''')
+    shape, _, _ = builder.build(path, overrides={"gap": gap, "minimum": minimum})
+    findings = checks.run(shape)
+    assert bool(findings) is failure
+    if failure:
+        finding, = findings
+        assert finding.rule == "clearance"
+        assert finding.components == ("mount_1", "camera_1")
+        assert finding.value == pytest.approx(max(0, gap))
+        assert finding.measurements == pytest.approx({
+            "clearance_mm": max(0, gap), "minimum_mm": minimum,
+            "overlap_mm3": max(0, -gap) * 4,
+        })
+        assert finding.where[0] == pytest.approx(1 + gap / 2)
+        assert "mount and camera" in finding.message
+    assert checks.run(shape, only=["motion"]) == []
+    assert checks.run(shape, only=["min_wall"]) == []
+
+
+def test_empty_intersections_are_clear_even_when_bounding_boxes_overlap():
+    from build123d import Pos, Sphere
+
+    from nurb.assembly import _hits
+
+    assert _hits(Sphere(1), [Pos(1.5, 1.5, 0) * Sphere(1)]) == (0.0, None)
+
+
+def test_static_clearance_is_declarative_not_a_global_collision_policy(project):
+    path = write(project, "fit", '''from nurb import *
+
+@assembly
+def fit():
+    return Box(2, 2, 2), Pos(1, 0, 0) * Box(2, 2, 2)
+''')
+    shape, _, _ = builder.build(path)
+    assert checks.run(shape) == []
+
+
+@pytest.mark.parametrize("declaration, match", [
+    ('clearance("missing", second)', "was not returned"),
+    ('clearance("plate", second)', "ambiguous"),
+    ('clearance(first, first)', "two different"),
+    ('clearance(first, second, minimum=-1)', "finite, nonnegative"),
+    ('clearance(first, second, minimum=float("nan"))', "finite, nonnegative"),
+])
+def test_clearance_declaration_errors_name_the_repair(project, declaration, match):
+    path = write(project, "fit", f'''from nurb import *
+
+@assembly
+def fit():
+    first = component(Box(2, 2, 2), "plate")
+    second = component(Pos(4, 0, 0) * Box(2, 2, 2), "plate")
+    {declaration}
+    return first, second
+''')
+    with pytest.raises(Exception, match=match):
+        builder.build(path)
+
+
+def test_clearance_can_address_repeated_components_by_stable_id(project):
+    path = write(project, "fit", '''from nurb import *
+
+@assembly
+def fit():
+    first = component(Box(2, 2, 2), "plate")
+    second = component(Pos(4, 0, 0) * Box(2, 2, 2), "plate")
+    clearance("plate_1", "plate_2", minimum=3.0)
+    return first, second
+''')
+    shape, _, _ = builder.build(path)
+    assert checks.run(shape)[0].components == ("plate_1", "plate_2")
+
+
+def test_repeated_nested_assemblies_preserve_child_roles_and_placed_geometry(project):
+    import io
+    import zipfile
+
+    import trimesh
+
+    from nurb.server import Server
+
+    write(project, "plate", PLATE)
+    write(project, "nested", '''from nurb import *
+
+@assembly
+def nested():
+    plate = Pos(2, 0, 0) * use("plate", width=4.0)
+    camera = obstacle(Pos(0, 8, 1) * Box(6, 4, 2), "camera")
+    clearance(plate, camera, minimum=2.0)
+    return plate, camera
+''')
+    pair = write(project, "pair", '''from nurb import *
+
+@assembly
+def pair():
+    left = Pos(10, 20, 30) * Rot(0, 0, 90) * use("nested")
+    right = Pos(-20, 0, 0) * use("nested")
+    clearance(left, right)
+    return left, right
+''')
+    shape, _, _ = builder.build(pair)
+    scene = shape._nurb_scene
+    components = {c.id: c for c in scene.components}
+    assert list(components) == [
+        "nested_1", "nested_1/plate_1", "nested_1/camera_1",
+        "nested_2", "nested_2/plate_1", "nested_2/camera_1",
+    ]
+    assert components["nested_1"].group is True
+    assert components["nested_2/camera_1"].role == "context"
+    assert components["nested_1/plate_1"].parent == "nested_1"
+    centers = {
+        "nested_1/plate_1": (10, 22, 30), "nested_1/camera_1": (2, 20, 31),
+        "nested_2/plate_1": (-18, 0, 0), "nested_2/camera_1": (-20, 8, 1),
+    }
+    for identity, expected in centers.items():
+        assert tuple(components[identity].solid.bounding_box().center()) == pytest.approx(expected)
+    glb = builder.to_glb(shape)
+    loaded = trimesh.load(io.BytesIO(glb), file_type="glb")
+    nodes = {node["extras"]["nurb"]["id"]: node for node in glb_nodes(shape) if "extras" in node}
+    assert "mesh" not in nodes["nested_1"]
+    assert len(loaded.geometry) == 4  # groups must not duplicate their children's meshes
+    for identity, expected in centers.items():
+        record = components[identity]
+        assert nodes[identity]["extras"]["nurb"] == record.wire()
+        mesh = loaded.geometry[record.node]
+        assert mesh.bounds.mean(axis=0) == pytest.approx(expected)
+    assert len(scene.instances) == 2
+    assert all(instance.path.endswith("/plate.py") for instance in scene.instances)
+    assert all(instance.overrides == (("width", 4.0),) for instance in scene.instances)
+    body, filename, _, _ = Server(project)._export("pair", "stl")
+    assert filename == "pair-stl.zip"
+    assert zipfile.ZipFile(io.BytesIO(body)).namelist() == ["plate.stl"]
+    findings = checks.run(shape)
+    assert [f.components for f in findings] == [
+        ("nested_1/plate_1", "nested_1/camera_1"),
+        ("nested_2/plate_1", "nested_2/camera_1"),
+    ]
+    assert all(f.value == pytest.approx(1.0) for f in findings)
+
+    outer = write(project, "outer", '''from nurb import *
+
+@assembly
+def outer():
+    return Pos(100, 0, 0) * use("pair")
+''')
+    wrapped, _, _ = builder.build(outer)
+    deepest = next(c for c in wrapped._nurb_scene.components if c.id == "pair_1/nested_1/plate_1")
+    assert tuple(deepest.solid.bounding_box().center()) == pytest.approx((110, 22, 30))
+    assert len(trimesh.load(io.BytesIO(builder.to_glb(wrapped)), file_type="glb").geometry) == 4
+
+
+def test_a_hinged_nested_assembly_keeps_its_group_node_and_context_children(project):
+    write(project, "nested", '''from nurb import *
+
+@assembly
+def nested():
+    return component(Box(2, 2, 2), "plate"), obstacle(Pos(4, 0, 0) * Box(2, 2, 2), "camera")
+''')
+    path = write(project, "outer", '''from nurb import *
+
+@assembly
+def outer(angle=30.0):
+    return hinge(use("nested"), Axis.Z, through=(0,90), at=angle, name="carrier")
+''')
+    shape, _, _ = builder.build(path)
+    nodes = {node["name"]: node for node in glb_nodes(shape)}
+    assert "mesh" not in nodes["joint0"]
+    assert len(nodes["joint0"]["children"]) == 2
+    camera = next(c for c in shape._nurb_scene.components if c.label == "camera")
+    assert camera.role == "context"
+    assert tuple(camera.solid.bounding_box().center()) == pytest.approx((2 * 3 ** 0.5, 2, 0))

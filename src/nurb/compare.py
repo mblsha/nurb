@@ -74,11 +74,119 @@ def setting(settings):
     transform = raw.get("transform")
     if transform is not None:
         transform = _transform(transform).reshape(-1).tolist()
-    return {
+    result = {
         "file": file,
         "units": units,
         "tolerance_mm": tolerance,
         "transform": transform,
+    }
+    if "regions" in raw:
+        result["regions"] = inspection_regions(raw["regions"])
+    return result
+
+
+def inspection_regions(raw):
+    """Validate named selectors in the aligned part's millimetre frame."""
+    if not isinstance(raw, list) or len(raw) > 32:
+        raise ValueError("target.regions must be a list of at most 32 named regions")
+    out, names = [], set()
+    for region in raw:
+        if not isinstance(region, dict):
+            raise ValueError("each inspection region needs a name and bounds_mm or component")
+        name = region.get("name")
+        if not isinstance(name, str) or not name.strip() or name in names:
+            raise ValueError("inspection region names must be nonempty and unique")
+        names.add(name)
+        bounds, component = region.get("bounds_mm"), region.get("component")
+        if (bounds is None) == (component is None):
+            raise ValueError(f"region {name!r} needs exactly one of bounds_mm or component")
+        if component is not None:
+            if not isinstance(component, str) or not component.strip():
+                raise ValueError(f"region {name!r} needs a component ID or label")
+            out.append({"name": name, "component": component})
+        else:
+            if not isinstance(bounds, dict):
+                raise ValueError(f"region {name!r} bounds_mm needs min and max vectors")
+            low, high = _vector(bounds.get("min")), _vector(bounds.get("max"))
+            if np.any(high <= low):
+                raise ValueError(f"region {name!r} max must exceed min on every axis")
+            out.append({"name": name, "bounds_mm": {"min": low.tolist(), "max": high.tolist()}})
+    return out
+
+
+def _vector(value):
+    try:
+        vector = np.asarray(value, dtype=float)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("a coordinate or direction must contain three finite numbers") from exc
+    if vector.shape != (3,) or not np.all(np.isfinite(vector)):
+        raise ValueError("a coordinate or direction must contain three finite numbers")
+    return vector
+
+
+def _rotation_between(source, target):
+    source, target = _vector(source), _vector(target)
+    if min(np.linalg.norm(source), np.linalg.norm(target)) < 1e-12:
+        raise ValueError("alignment directions must be nonzero")
+    source, target = source / np.linalg.norm(source), target / np.linalg.norm(target)
+    cross, dot = np.cross(source, target), np.clip(np.dot(source, target), -1, 1)
+    if dot > 1 - 1e-12:
+        return np.eye(3)
+    if dot < -1 + 1e-12:
+        basis = np.eye(3)[np.argmin(np.abs(source))]
+        axis = np.cross(source, basis)
+        axis /= np.linalg.norm(axis)
+        return 2 * np.outer(axis, axis) - np.eye(3)
+    x, y, z = cross
+    skew = np.asarray([[0, -z, y], [z, 0, -x], [-y, x, 0]])
+    return np.eye(3) + skew + skew @ skew / (1 + dot)
+
+
+def datum_alignment(transform, operation):
+    """Preview a rigid datum move; input landmarks are in the currently aligned part frame."""
+    if not isinstance(operation, dict):
+        raise ValueError("alignment operation must describe a plane, axis, or landmarks")
+    kind = operation.get("kind")
+    delta = np.eye(4)
+    residuals = np.zeros(1)
+    if kind in ("plane", "axis"):
+        source = _vector(operation.get("origin_mm"))
+        direction = operation.get("normal" if kind == "plane" else "direction")
+        rotation = _rotation_between(direction, operation.get("target_direction", [0, 0, 1]))
+        target = _vector(operation.get("target_origin_mm", [0, 0, 0]))
+        delta[:3, :3], delta[:3, 3] = rotation, target - rotation @ source
+    elif kind == "landmarks":
+        try:
+            source = np.asarray(operation.get("source_mm"), dtype=float)
+            target = np.asarray(operation.get("target_mm"), dtype=float)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("landmarks need matching lists of finite 3D points") from exc
+        if source.ndim != 2 or source.shape[1:] != (3,) or source.shape != target.shape or not 1 <= len(source) <= 100 or not np.all(np.isfinite(source)) or not np.all(np.isfinite(target)):
+            raise ValueError("landmarks need 1 to 100 matching finite 3D points")
+        a, b = source.mean(axis=0), target.mean(axis=0)
+        if len(source) == 1:
+            rotation = np.eye(3)
+        elif len(source) == 2:
+            rotation = _rotation_between(source[1] - source[0], target[1] - target[0])
+        else:
+            if min(np.linalg.matrix_rank(source - a), np.linalg.matrix_rank(target - b)) < 2:
+                raise ValueError("three or more landmarks must not all lie on one line")
+            u, _, vt = np.linalg.svd((source - a).T @ (target - b))
+            fix = np.diag([1, 1, np.linalg.det(vt.T @ u.T)])
+            rotation = vt.T @ fix @ u.T
+        delta[:3, :3], delta[:3, 3] = rotation, b - rotation @ a
+        residuals = np.linalg.norm(source @ rotation.T + delta[:3, 3] - target, axis=1)
+    else:
+        raise ValueError("alignment kind must be plane, axis, or landmarks")
+    combined = delta @ _transform(IDENTITY if transform is None else transform)
+    return {
+        "transform": _transform(combined.reshape(-1)).reshape(-1).tolist(),
+        "delta_transform": delta.reshape(-1).tolist(),
+        "frame": "part_mm",
+        "kind": kind,
+        "rms_residual_mm": float(np.sqrt(np.mean(residuals ** 2))),
+        "max_residual_mm": float(residuals.max()),
+        "constraint": "translation only" if kind == "landmarks" and len(source) == 1 else "minimum rotation; roll is unconstrained" if kind != "landmarks" or len(source) == 2 else "rigid least-squares fit",
     }
 
 
@@ -99,7 +207,7 @@ def centered_transform(part, mesh):
     return matrix.reshape(-1).tolist()
 
 
-def against(shape, mesh, tolerance_mm=DEFAULT_TOLERANCE_MM, transform=None):
+def against(shape, mesh, tolerance_mm=DEFAULT_TOLERANCE_MM, transform=None, regions=None):
     """Return bidirectional deviation, tolerance coverage, and spatial samples.
 
     The random area samples provide unbiased coverage and percentile estimates. Vertices and the centroids of small faces are added to the sampled maximum, then nearest points found from the opposite direction are folded back into each side. That refinement makes a small pocket visible even when its footprint is too small for a random sample to land inside.
@@ -136,7 +244,7 @@ def against(shape, mesh, tolerance_mm=DEFAULT_TOLERANCE_MM, transform=None):
     part_regions = _regions(part_all_points, part_all_d, tolerance_mm, "part_to_target")
     target_regions = _regions(target_all_points, target_all_d, tolerance_mm, "target_to_part")
     detected = bool(np.any(part_all_d > tolerance_mm) or np.any(target_all_d > tolerance_mm))
-    return {
+    result = {
         "transform": [float(v) for v in matrix.reshape(-1)],
         "offset": [round(float(v), 6) for v in matrix[:3, 3]],
         "transform_frame": "unit-normalized target coordinates to part coordinates, both in millimetres",
@@ -163,6 +271,68 @@ def against(shape, mesh, tolerance_mm=DEFAULT_TOLERANCE_MM, transform=None):
             "target_feature_and_refinement": len(target_all_points) - target_stat_count,
         },
     }
+    if regions:
+        result["inspection_regions"] = [
+            _inspect_region(shape, part, moved, part_surface, target_surface, region, tolerance_mm)
+            for region in inspection_regions(regions)
+        ]
+    return result
+
+
+def _clip_region(mesh, bounds):
+    import trimesh
+    from trimesh.intersections import slice_faces_plane
+
+    vertices, faces = np.asarray(mesh.vertices), np.asarray(mesh.faces)
+    for axis in range(3):
+        for side, sign in (("min", 1), ("max", -1)):
+            if not len(faces):
+                break
+            origin, normal = np.zeros(3), np.zeros(3)
+            # Include the selected boundary itself, including coplanar CAD faces.
+            origin[axis], normal[axis] = bounds[side][axis] - sign * 1e-7, sign
+            vertices, faces, _ = slice_faces_plane(vertices, faces, normal, origin)
+    return trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+
+def _inspect_region(shape, part, target, part_surface, target_surface, region, tolerance):
+    result = {"name": region["name"], "selector": region, "frame": "part_mm"}
+    bounds = region.get("bounds_mm")
+    selected = part
+    if "component" in region:
+        components = getattr(getattr(shape, "_nurb_scene", None), "components", ())
+        matches = [c for c in components if region["component"] in (getattr(c, "id", None), getattr(c, "label", None))]
+        if len(matches) != 1:
+            return {**result, "status": "unresolved", "error": "choose a unique component ID or label from this assembly"}
+        selected = _part_mesh(matches[0].solid, tolerance)
+        if not len(selected.faces):
+            return {**result, "status": "empty", "error": "the component has no surface"}
+        bounds = {"min": selected.bounds[0].tolist(), "max": selected.bounds[1].tolist()}
+        part_surface = _surface(selected)
+        result["reference_selection"] = "reference surface inside the component bounds"
+    result.update({"bounds_mm": bounds, "capture": {"region": region["name"], "bounds_mm": bounds, "frame": "part_mm"}})
+    local_part, local_target = _clip_region(selected, bounds), _clip_region(target, bounds)
+    worst, samples, missing, detected = [], {}, [], False
+    for key, local, other, direction in (("part", local_part, target_surface, "part_to_target"), ("target", local_target, part_surface, "target_to_part")):
+        if not len(local.faces) or local.area <= 1e-12:
+            result[key], samples[key] = None, 0
+            missing.append(key)
+            continue
+        points, _, count = _sample(local)
+        distances = _to_surface(points, other)
+        detected |= bool(np.any(distances > tolerance))
+        result[key] = _stats(distances[:count], distances, tolerance)
+        samples[key] = len(points)
+        worst.extend(_regions(points, distances, tolerance, direction))
+    result.update({
+        "status": "empty" if len(missing) == 2 else "partial" if missing else "measured",
+        "sample_count": samples,
+        "tolerance_mm": tolerance,
+        "detected_above_tolerance": detected if len(missing) < 2 else None,
+        "worst_regions": sorted(worst, key=lambda r: r["peak_deviation_mm"], reverse=True)[:MAX_REGIONS],
+        "method": "sample surfaces inside selection; distances to the complete opposite surface; no artificial cut caps",
+    })
+    return result
 
 
 def report(name, file, metrics, unit, source):
@@ -201,6 +371,13 @@ def report(name, file, metrics, unit, source):
             )
     else:
         lines.insert(3, "      no sampled deviation above tolerance detected")
+    for region in metrics.get("inspection_regions", []):
+        lines.append(f"      inspection {region['name']}: {region['status']}")
+        for side in ("part", "target"):
+            if region.get(side):
+                lines.append(f"        {side}: {_line(region[side])}")
+        if region.get("error"):
+            lines.append(f"        {region['error']}")
     return lines
 
 
@@ -215,7 +392,7 @@ def update_card(part_path, **changes):
     current = setting(checks.settings(path))
     if current is None:
         raise ValueError(f"{path.stem} has no target in its card")
-    allowed = {"units", "tolerance_mm", "transform"}
+    allowed = {"units", "tolerance_mm", "transform", "regions"}
     unknown = set(changes) - allowed
     if unknown:
         raise ValueError(f"unknown target setting: {', '.join(sorted(unknown))}")
@@ -228,7 +405,7 @@ def update_card(part_path, **changes):
     block, after = rest.split("```", 1)
     block = _replace_target(block, normalized, require=True)
     card.write_text(before + opening + block + "```" + after, encoding="utf-8")
-    return [name for name in ("units", "tolerance_mm", "transform") if name in changes]
+    return [name for name in ("units", "tolerance_mm", "transform", "regions") if name in changes]
 
 
 def attach_reference(part_path, relative_file, units=None, tolerance_mm=DEFAULT_TOLERANCE_MM):
@@ -372,6 +549,8 @@ def _format_setting(target):
     if target.get("transform") is not None:
         matrix = ", ".join(repr(float(v)) for v in target["transform"])
         fields.append(f"transform = [{matrix}]")
+    if "regions" in target:
+        fields.append("regions = " + _toml_value(target["regions"]))
     return "target = { " + ", ".join(fields) + " }"
 
 
@@ -383,7 +562,17 @@ def _format_table(target):
     if target.get("transform") is not None:
         matrix = ", ".join(repr(float(v)) for v in target["transform"])
         fields.append(f"transform = [{matrix}]")
+    if "regions" in target:
+        fields.append("regions = " + _toml_value(target["regions"]))
     return "\n".join(fields) + "\n"
+
+
+def _toml_value(value):
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{key} = {_toml_value(item)}" for key, item in value.items()) + " }"
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    return _toml_string(value) if isinstance(value, str) else repr(value)
 
 
 def _toml_string(value):

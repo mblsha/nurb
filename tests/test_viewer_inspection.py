@@ -1,0 +1,246 @@
+"""Geometry and display contracts for assembly inspection and reference sections."""
+
+import json
+import pathlib
+import shutil
+import subprocess
+
+import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+VIEWER = (ROOT / "src/nurb/viewer.html").read_text()
+THREE = (ROOT / "src/nurb/vendor/three/build/three.module.min.js").as_uri()
+
+
+def js(functions, checks):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is needed for viewer geometry checks")
+    source = f"import * as THREE from {json.dumps(THREE)};\nimport assert from 'node:assert/strict';\n"
+    for start, end in functions:
+        source += start + VIEWER.split(start, 1)[1].split(end, 1)[0] + "\n"
+    result = subprocess.run([node, "--input-type=module", "-"], input=source + checks,
+                            encoding="utf-8", capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_section_closes_solids_in_part_coordinates_and_preserves_nested_holes():
+    js([("function sectionContours(", "function sectionDifference(")], """
+const identity = new THREE.Matrix4();
+const square = new THREE.Shape(); square.moveTo(-5,-5); square.lineTo(5,-5);
+square.lineTo(5,5); square.lineTo(-5,5); square.closePath();
+const hole = new THREE.Path(); hole.moveTo(-2,-2); hole.lineTo(-2,2);
+hole.lineTo(2,2); hole.lineTo(2,-2); hole.closePath(); square.holes.push(hole);
+const geometry = new THREE.ExtrudeGeometry(square, {depth:4, bevelEnabled:false});
+const section = sectionContours(geometry, identity, 2, 1.37);
+assert.equal(section.valid, true); assert.equal(section.loops.length, 2);
+const shifted = sectionContours(geometry, new THREE.Matrix4().makeTranslation(10,20,30), 2, 31.37);
+assert.equal(shifted.valid, true); assert.equal(shifted.loops.length, 2);
+const positions = shifted.loops.flat();
+assert.equal(Math.min(...positions.map(p => p[0])), 5);
+assert.equal(Math.max(...positions.map(p => p[1])), 25);
+const islands = new THREE.BoxGeometry(2,2,2);
+assert.equal(sectionContours(islands, identity, 0, .317).valid, true);
+assert.equal(sectionContours(islands, identity, 1, .317).valid, true);
+""")
+
+
+def test_section_refuses_open_meshes_and_coplanar_boundaries_instead_of_filling_them():
+    js([("function sectionContours(", "function sectionDifference(")], """
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.Float32BufferAttribute([-1,0,-1, 1,0,1, 0,2,-1],3));
+const open = sectionContours(geometry, new THREE.Matrix4(), 2, 0);
+assert.equal(open.valid,false); assert.match(open.reason,/open/);
+assert.equal(open.segments.length,1);
+const grazing = sectionContours(new THREE.BoxGeometry(2,2,2), new THREE.Matrix4(), 2, 1);
+assert.equal(grazing.valid,false); assert.match(grazing.reason,/coplanar/);
+const empty = sectionContours(new THREE.BoxGeometry(2,2,2), new THREE.Matrix4(), 2, 4);
+assert.equal(empty.valid,true); assert.equal(empty.segments.length,0);
+""")
+
+
+def test_component_identity_is_preserved_and_visibility_does_not_change_geometry():
+    js([("function componentInfo(", "function inspectionSave(")], """
+const mesh = new THREE.Group();
+const a = new THREE.Mesh(new THREE.BoxGeometry()), b = new THREE.Mesh(new THREE.BoxGeometry());
+a.name = 'fixed-a'; a.userData.nurb = {id:'socket-1',label:'Left socket',role:'part'};
+b.name = 'context'; mesh.add(a,b);
+assert.deepEqual(componentInfo(a), {id:'socket-1',label:'Left socket',role:'part'});
+assert.equal(componentInfo(b).role,'context');
+const before = a.geometry.attributes.position.array.slice(); a.visible = false;
+assert.equal(modelNodes().length,2); assert.deepEqual(a.geometry.attributes.position.array,before);
+""")
+
+
+def test_datum_preview_with_no_written_files_stays_a_preview_until_apply():
+    js([("function datumLanded(", "function regionValues(")], """
+const current = 'part', parts = new Map([['part',{token:'a'}]]);
+let datumPreview = {name:'part',token:'a',operation:{kind:'axis'}}, previewed = null, mode = null;
+const fields = {datumstatus:{textContent:''},datumapply:{disabled:true}};
+const document = {getElementById: id => fields[id]};
+function comparisonPreview(transform) { previewed=transform; }
+function inspectionSetMode(value) { mode=value; }
+const transform = [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+datumLanded({name:'part',token:'a',written:[],transform,max_residual_mm:.01});
+assert.deepEqual(previewed,transform); assert.deepEqual(datumPreview.transform,transform); assert.equal(mode,'overlay');
+assert.ok(datumPreview); assert.equal(fields.datumapply.disabled,false);
+assert.match(fields.datumstatus.textContent,/Preview ready/);
+datumLanded({name:'part',token:'a',written:['parts/part.md']});
+assert.equal(datumPreview,null); assert.equal(fields.datumapply.disabled,true);
+assert.equal(fields.datumstatus.textContent,'Alignment saved.');
+""")
+
+
+def test_section_tolerance_mutes_small_offsets_but_preserves_larger_material_defects():
+    js([("function sectionMaskDistance(", "function sectionDifference(")], """
+const width=12,height=5,cad=new Uint8Array(width*height),ref=new Uint8Array(width*height);
+for(let y=1;y<4;y++) for(let x=2;x<7;x++) {cad[y*width+x]=1;ref[y*width+x+1]=1;}
+cad[2*width+10]=1;
+const exact=sectionMaskClassify(cad,ref,width,height,0);
+assert.equal(exact[2*width+2],2); assert.equal(exact[2*width+7],3);
+const accepted=sectionMaskClassify(cad,ref,width,height,1);
+assert.equal(accepted[2*width+2],1); assert.equal(accepted[2*width+7],1);
+assert.equal(accepted[2*width+10],2);
+assert.equal(accepted[0],0);
+const mask=new Uint8Array(25);mask[12]=1;
+const distance=sectionMaskDistance(mask,5,5);
+assert.equal(distance[0],8);assert.equal(distance[12],0);assert.equal(distance[13],1);
+""")
+
+
+def test_nested_component_groups_select_and_hide_descendant_leaves():
+    js([("function componentInfo(", "function inspectionSave("),
+        ("function componentAncestors(", "function componentPanel(")], """
+const mesh = new THREE.Group(), inspectionGroups = new Map([
+  ['mount',{id:'mount',parent:null}],['mount/insert',{id:'mount/insert',parent:'mount'}]]);
+const a = new THREE.Mesh(), b = new THREE.Mesh();
+a.userData.nurb={id:'mount/insert/body',label:'body',role:'part',parent:'mount/insert'};
+b.userData.nurb={id:'mount/wall',label:'wall',role:'context',parent:'mount'};mesh.add(a,b);
+const hiddenComponents = new Set(['mount']);
+assert.deepEqual(componentAncestors(a),['mount/insert','mount']);
+assert.deepEqual(componentMembers('mount'),[a,b]);
+assert.deepEqual(componentMembers('mount/insert'),[a]);
+assert.equal(componentHidden(a),true);assert.equal(componentHidden(b),true);
+hiddenComponents.clear();hiddenComponents.add('mount/insert');
+assert.equal(componentHidden(a),true);assert.equal(componentHidden(b),false);
+""")
+
+
+def test_embedded_section_scale_reserves_space_above_the_viewer_footer():
+    section = VIEWER.split("function sectionDifference()", 1)[1].split("function referenceInspectionLanded", 1)[0]
+    assert "mm / 100 px`, 16, height - (embed ? 44 : 18)" in section
+
+
+def test_datum_apply_rejects_other_parts_and_new_builds_and_uses_the_captured_token():
+    js([("function datumReset(", "function inspectionVector("),
+        ("function datumSend(", "document.getElementById('datumkind').onchange")], """
+let current='A',datumPreview=null;
+const parts=new Map([['A',{token:'a1'}],['B',{token:'b1'}]]),comparePreview=new Map(),sent=[];
+const fields={datumstatus:{textContent:''},datumapply:{disabled:false}};
+const document={getElementById:id=>fields[id]},WebSocket={OPEN:1};
+const sock={readyState:1,send:value=>sent.push(JSON.parse(value))};
+function datumOperation(){return {kind:'axis',origin_mm:[0,0,0]};}
+datumSend(false);
+assert.equal(sent[0].name,'A');assert.equal(sent[0].token,'a1');
+assert.equal(datumPreview.transform,null);
+datumSend(true);assert.equal(sent.length,1);
+datumPreview.transform=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+current='B';datumSend(true);
+assert.equal(sent.length,1);assert.equal(datumPreview,null);assert.equal(fields.datumapply.disabled,true);
+assert.match(fields.datumstatus.textContent,/selected part or build changed/);
+current='A';datumSend(false);datumPreview.transform=[1];parts.set('A',{token:'a2'});datumSend(true);
+assert.equal(sent.length,2);assert.equal(datumPreview,null);
+datumSend(false);datumPreview.transform=[1];datumSend(true);
+assert.equal(sent.length,4);assert.equal(sent[3].token,'a2');assert.equal(sent[3].name,'A');assert.equal(sent[3].save,true);
+""")
+
+
+def test_switching_parts_resets_the_pending_datum_preview():
+    js([("function inspectionRestore(", "function componentAncestors("),
+        ("function datumReset(", "function inspectionVector(")], """
+let inspectionFor='A',inspectionFrameBox={},hiddenComponents=new Set(),inspectionRegionName='old',inspectionRegionError='old',sectionDrawingKey='old';
+let datumPreview={name:'A',token:'a1',operation:{},transform:[1]};
+const comparePreview=new Map([['A',{transform:[1]}]]),q=new URLSearchParams(),view='top';
+const fields={datumapply:{disabled:false},datumstatus:{textContent:'Preview ready'}};
+const document={getElementById:id=>fields[id]};
+inspectionRestore('B');
+assert.equal(datumPreview,null);assert.equal(fields.datumapply.disabled,true);assert.equal(fields.datumstatus.textContent,'');
+assert.equal(comparePreview.has('A'),false);assert.equal(inspectionFor,'B');
+""")
+
+
+def test_subpixel_section_tolerance_does_not_accept_a_full_pixel_gap():
+    js([("function sectionMaskDistance(", "function sectionDifference(")], """
+const cad=Uint8Array.from([1,0,0]),reference=Uint8Array.from([0,1,0]);
+for(const tolerance of [.00001,.2,.999]) assert.deepEqual(Array.from(sectionMaskClassify(cad,reference,3,1,tolerance)),[2,3,0]);
+assert.deepEqual(Array.from(sectionMaskClassify(cad,reference,3,1,1)),[1,1,0]);
+""")
+
+
+def test_initial_hide_resolves_ids_and_repeated_labels_for_leaves_and_groups():
+    js([("function componentInfo(", "function inspectionSave("),
+        ("function componentAncestors(", "function componentPanel(")], """
+const mesh=new THREE.Group(),inspectionGroups=new Map([
+ ['a',{id:'a',label:'Assembly'}],['b',{id:'b',label:'Assembly'}]]);
+const leaf=(id,label,parent)=>{const n=new THREE.Mesh(new THREE.BoxGeometry());n.userData.nurb={id,label,parent,role:'part'};mesh.add(n);return n;};
+const one=leaf('a/socket','Socket','a'),two=leaf('b/socket','Socket','b'),other=leaf('body','Body',null);
+let hiddenComponents=new Set(['Socket']);componentResolveHidden();
+assert.deepEqual([...hiddenComponents],['a/socket','b/socket']);
+assert.equal(componentHidden(one),true);assert.equal(componentHidden(two),true);assert.equal(componentHidden(other),false);
+hiddenComponents=new Set(['Assembly']);componentResolveHidden();
+assert.deepEqual([...hiddenComponents],['a','b']);assert.equal(componentHidden(one),true);assert.equal(componentHidden(two),true);
+hiddenComponents=new Set(['body']);componentResolveHidden();assert.equal(componentHidden(other),true);
+assert.deepEqual(componentMembers('Socket'),[one,two]);
+""")
+
+
+def test_region_labels_resolve_and_unresolved_capture_fails_instead_of_using_whole_model():
+    js([("function componentInfo(", "function inspectionSave("),
+        ("function componentAncestors(", "function componentPanel("),
+        ("function inspectionSelectedMetrics(", "function inspectionRegions(")], """
+const current='assembly',mesh=new THREE.Group(),inspectionGroups=new Map();
+const board=new THREE.Mesh(new THREE.BoxGeometry(4,6,2));board.userData.nurb={id:'board_1',label:'Board',role:'part'};mesh.add(board);
+const entry={target:{regions:[{name:'board fit',component:'Board'},{name:'missing',component:'Missing'}]}};
+const parts=new Map([[current,entry]]),window={__nurb:{error:null}};
+let inspectionRegionName=null,inspectionRegionError=null,inspectionFrameBox=null,currentFrameBox=null,framed=[];
+function frame(box){framed.push(box);}function comparePanel(){}function comparisonAbove(){return false;}
+assert.equal(inspectionSelectRegion('board fit',true),true);assert.equal(framed.length,1);
+assert.deepEqual(framed[0].getSize(new THREE.Vector3()).toArray(),[4,6,2]);
+assert.equal(inspectionSelectRegion('missing',true),false);assert.equal(framed.length,1);
+assert.match(window.__nurb.error,/no resolvable bounds/);
+entry.target.metrics={inspection_regions:[{name:'board fit',status:'partial',bounds_mm:{min:[1,2,3],max:[5,8,9]}}]};
+assert.deepEqual(inspectionRegionBounds(entry,'board fit').box.min.toArray(),[1,2,3]);
+""")
+
+
+def test_selected_regions_show_local_stats_status_and_worst_regions_until_whole_model():
+    js([("function inspectionSelectedMetrics(", "function inspectionRegionBounds("),
+        ("function comparisonRows(", "function compareClear("),
+        ("function comparisonWorst(", "function comparisonFocus(")], """
+const regional={name:'seat',status:'partial',part:{sampled_max:.6,p95:.4,within_tolerance:.5},target:null,
+ detected_above_tolerance:true,worst_regions:[{position_mm:[1,2,3],peak_deviation_mm:.6}]};
+const global={part:{sampled_max:8},target:{sampled_max:9},inspection_regions:[regional]};
+const selected=inspectionSelectedMetrics(global,'seat');
+assert.equal(selected,regional);assert.equal(comparisonRows(selected)[0][1],'0.600');assert.equal(comparisonRows(selected)[1][1],'n/a');
+assert.equal(comparisonWorst(selected),regional.worst_regions);
+assert.match(inspectionRegionStatus(selected,.2),/Partial region: no reference samples/);
+assert.match(inspectionRegionStatus(selected,.2),/Deviation above tolerance/);
+assert.equal(inspectionSelectedMetrics(global,null),global);
+assert.equal(inspectionSelectedMetrics(global,'missing'),null);
+""")
+
+
+def test_region_crud_waits_for_previous_write_instead_of_replacing_unseen_regions():
+    js([("function regionSave(", "document.getElementById('regionsave').onclick")], """
+const current='part',regionWrites=new Map(),sent=[],WebSocket={OPEN:1};
+const parts=new Map([[current,{target:{regions:[]}}]]);
+const fields={regionstatus:{textContent:''},regionname:{value:'A'},regionexisting:{value:''},regionsave:{disabled:false},regionremove:{disabled:false}};
+const document={getElementById:id=>fields[id]},sock={readyState:1,send:message=>sent.push(JSON.parse(message))};
+function regionValues(){return {name:fields.regionname.value,component:'body'};}
+regionSave();assert.deepEqual(sent[0].regions,[{name:'A',component:'body'}]);assert.equal(fields.regionsave.disabled,true);
+fields.regionname.value='B';regionSave();assert.equal(sent.length,1);assert.match(fields.regionstatus.textContent,/previous region change/);
+fields.regionexisting.value='A';regionSave(true);assert.equal(sent.length,1);
+parts.set(current,{target:{regions:sent[0].regions}});regionWrites.delete(current);
+fields.regionexisting.value='';regionSave();assert.deepEqual(sent[1].regions,[{name:'A',component:'body'},{name:'B',component:'body'}]);
+fields.regionexisting.value='B';fields.regionname.value='edited';regionSave();assert.equal(sent.length,2);
+""")

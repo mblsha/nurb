@@ -178,7 +178,7 @@ def _user_traceback(exc, path):
 
 
 class Server:
-    REFERENCE_EXTENSIONS = {".stl", ".obj", ".glb", ".ply"}
+    REFERENCE_EXTENSIONS = {".stl", ".obj", ".glb", ".ply", ".ply.gz", ".step", ".stp", ".brep"}
     REFERENCE_LIMIT = 48 * 1024 * 1024
 
     @staticmethod
@@ -186,7 +186,16 @@ class Server:
         """Parse an upload without giving the mesh loader access to sidecar files."""
         import trimesh
 
-        suffix = pathlib.Path(filename).suffix.lower()
+        from . import scan
+
+        suffix = scan.reference_suffix(filename)
+        if suffix == ".ply.gz":
+            body = scan.decompress_ply(io.BytesIO(body), filename)
+            suffix = ".ply"
+        if suffix in {".step", ".stp", ".brep"}:
+            # The destination is parsed by scan.load before attaching it to the card.
+            # Unlike OBJ/glTF, these analytic imports do not use trimesh sidecars.
+            return
         if suffix == ".obj":
             # trimesh joins OBJ backslash continuations before looking for mtllib.
             # Mirror that normalization so `mtl\\\nlib` cannot hide a sidecar read.
@@ -237,7 +246,7 @@ class Server:
         except Exception as exc:
             raise ValueError(f"{filename}: {exc}") from exc
         if not hasattr(mesh, "faces") or len(mesh.faces) == 0:
-            raise ValueError(f"{filename} has no triangles to measure, only points")
+            raise ValueError(f"{filename} has no triangles to measure, only points; export a mesh with triangles or rescan in the app's mesh mode")
 
     def __init__(self, root, port=7373, tolerance=0.1, draft=False, open_browser=False):
         self.root = pathlib.Path(root).resolve()
@@ -429,6 +438,10 @@ class Server:
                 from .assembly import wire
 
                 entry["joints"] = wire(scene)
+                entry["components"] = [
+                    {**component.wire(), "node": component.node}
+                    for component in getattr(scene, "components", ())
+                ]
                 # What the stl button downloads instead of the merged scene.
                 entry["uses"] = sorted(pathlib.Path(u).stem for u in scene.uses)
         except registry.Rejected as exc:
@@ -685,6 +698,8 @@ class Server:
                     # it does not. The viewer never needs the doctrine's vocabulary.
                     "message": f.said,
                     "where": list(f.where) if f.where else None,
+                    **({"components": list(f.components)} if getattr(f, "components", None) else {}),
+                    **({"measurements": f.measurements} if getattr(f, "measurements", None) else {}),
                     "face": [round(v, 2) for v in builder.face_triangles(row["face"])]
                     if row is not None
                     else None,
@@ -716,6 +731,7 @@ class Server:
                     hit["mesh"],
                     tolerance_mm=target["tolerance_mm"],
                     transform=target["transform"],
+                    regions=target.get("regions"),
                 )
                 # The ghost draws with the transform the numbers used, never a stale one.
                 target["transform"] = metrics.pop("transform")
@@ -783,6 +799,7 @@ class Server:
             "alignment": alignment,
             "stamp": hit["stamp"],
             "offset": [round(float(transform[i]), 6) for i in (3, 7, 11)],
+            "regions": declared.get("regions", []),
         }
         entry["target_glb"] = hit["glb"]
 
@@ -1438,12 +1455,85 @@ class Server:
         if path.parent != parts_dir or not path.is_file():
             return
 
+        if msg.get("type") == "target_inspection":
+            from . import scan
+
+            try:
+                specs = msg.get("sections", ["x", "y", "z"])
+                if not isinstance(specs, list) or len(specs) > 24 or any(not isinstance(spec, str) for spec in specs):
+                    raise ValueError("request at most 24 axis-aligned sections")
+                async with self.building:
+                    # A build can finish while this request waits for the kernel.
+                    # Capture the reference and its build token only after that wait.
+                    entry = self.state.get(name, {})
+                    target = entry.get("target")
+                    if not target or target.get("error"):
+                        raise ValueError("attach a readable reference before inspecting it")
+                    if target.get("stale"):
+                        raise ValueError("the reference changed; wait for its rebuild and inspect again")
+                    snapshot = {key: target.get(key) for key in ("file", "units", "stamp")}
+                    snapshot["transform"] = list(target["transform"])
+                    token = entry.get("token")
+                    card_bytes = path.with_suffix(".md").read_bytes()
+
+                    def inspect_reference():
+                        hit = self._target_mesh(snapshot["file"], snapshot["units"])
+                        if hit["stamp"] != snapshot["stamp"]:
+                            raise ValueError("the reference changed; wait for its rebuild and inspect again")
+                        cuts = [scan.section(hit["mesh"], spec) for spec in specs]
+                        inspection = scan.inspection(hit["path"], hit["mesh"], cuts)
+                        if self._target_mesh(snapshot["file"], snapshot["units"])["stamp"] != snapshot["stamp"]:
+                            raise ValueError("the reference changed during inspection; inspect again")
+                        return inspection
+                    inspection = await asyncio.to_thread(inspect_reference)
+                    current = self.state.get(name, {})
+                    reference = current.get("target") or {}
+                    if (current is not entry or current.get("token") != token
+                            or reference.get("error") or reference.get("stale")
+                            or any(reference.get(key) != value for key, value in snapshot.items())
+                            or path.with_suffix(".md").read_bytes() != card_bytes):
+                        raise ValueError("the model or reference changed during inspection; inspect again")
+                    response = {"type": "target_inspection", "name": name,
+                                "inspection": inspection, "transform": snapshot["transform"],
+                                "stamp": snapshot["stamp"], "token": token}
+                await self.reply(client, response)
+            except (ValueError, OSError) as exc:
+                await self.reply(client, {"type": "target_inspection", "name": name, "error": str(exc)})
+            return
+
+        if msg.get("type") == "target_alignment":
+            from . import compare
+
+            try:
+                async with self.building:
+                    entry = self.state.get(name, {})
+                    target = entry.get("target")
+                    if not target or target.get("error"):
+                        raise ValueError("attach a readable reference before aligning it")
+                    if msg.get("token") is not None and msg["token"] != entry.get("token"):
+                        raise ValueError("the model rebuilt; pick its datums again")
+                    if target.get("stale"):
+                        raise ValueError("the reference changed; wait for its rebuild and pick its datums again")
+                    preview = compare.datum_alignment(target["transform"], msg.get("operation"))
+                    written = []
+                    if msg.get("save") is True:
+                        written = compare.update_card(path, transform=preview["transform"])
+                        target.pop("metrics", None)
+                        target["stale"] = True
+                        self.queue.put_nowait(str(path))
+                    response = {"type": "target_alignment", "name": name, **preview,
+                                "written": written, "token": entry.get("token")}
+                await self.reply(client, response)
+            except (ValueError, OSError) as exc:
+                await self.reply(client, {"type": "target_alignment", "name": name, "error": str(exc)})
+            return
+
         if msg.get("type") == "target_settings":
             from . import compare
 
             changes = {
                 key: msg[key]
-                for key in ("units", "tolerance_mm", "transform")
+                for key in ("units", "tolerance_mm", "transform", "regions")
                 if key in msg
             }
             if not changes:
@@ -1452,7 +1542,7 @@ class Server:
                     {
                         "type": "target_settings",
                         "name": name,
-                        "error": "choose units, tolerance, or alignment to update",
+                        "error": "choose units, tolerance, alignment, or inspection regions to update",
                     },
                 )
                 return
@@ -1467,6 +1557,10 @@ class Server:
             # Queue explicitly as well as relying on the file watcher. This command is
             # also exercised by adapters and tests with no native watcher delivering
             # the card write back to the process.
+            target = self.state.get(name, {}).get("target")
+            if target:
+                target.pop("metrics", None)
+                target["stale"] = True
             self.queue.put_nowait(str(path))
             await self.reply(
                 client,
@@ -1482,7 +1576,9 @@ class Server:
                     written = compare.remove_reference(path)
                 else:
                     filename = pathlib.Path(str(msg.get("filename") or "")).name
-                    suffix = pathlib.Path(filename).suffix.lower()
+                    from . import scan
+
+                    suffix = scan.reference_suffix(filename)
                     if suffix not in self.REFERENCE_EXTENSIONS:
                         supported = ", ".join(sorted(self.REFERENCE_EXTENSIONS))
                         raise ValueError(f"reference must be one of: {supported}")
@@ -1496,14 +1592,14 @@ class Server:
                     if not body:
                         raise ValueError("reference file is empty")
                     if len(body) > self.REFERENCE_LIMIT:
-                        raise ValueError("reference file is larger than the 48 MB viewer limit")
+                        raise ValueError("reference file is larger than the 48 MiB viewer limit")
                     self._validate_reference_source(filename, body)
                     units = msg.get("units")
                     from .scan import UNITS
 
                     if units not in UNITS:
                         raise ValueError(f"reference units must be one of {', '.join(UNITS)}")
-                    safe = _export_name(pathlib.Path(filename).stem)[:48] or "mesh"
+                    safe = _export_name(filename[:-len(suffix)])[:48] or "mesh"
                     digest = hashlib.blake2b(body, digest_size=5).hexdigest()
                     relative = pathlib.Path("scans") / f"{name}-{safe}-{digest}{suffix}"
                     destination = (self.root / relative).resolve()

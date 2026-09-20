@@ -16,6 +16,7 @@ import pathlib
 import re
 import socket
 import threading
+from urllib.parse import urlencode
 
 from .builder import BuildError
 
@@ -26,6 +27,7 @@ because it pulls down a browser and nothing else in nurb needs one:
   uv run playwright install chromium"""
 
 VIEWS = ("iso", "front", "back", "left", "right", "top")
+MODES = ("model", "reference", "overlay", "deviation", "side-by-side", "section")
 
 # The viewer's grammar for a section cut: an axis, optionally with a position that is a
 # fraction of the span or an absolute millimetre coordinate. Checked here so a typo is
@@ -93,10 +95,16 @@ def snapshots(root, shots, timeout=30000):
     `view` (a name or an `x,y,z` direction), `size`, `chrome`, `overrides` (parameter
     values, so a variant can sit for its own picture), `cut` (a section, in the
     viewer's grammar), `check` (run the rules so findings mark the picture), and
-    `marks=False` (check, but picture the part clean).
+    `marks=False` (check, but picture the part clean). `mode` selects model, reference,
+    overlay, deviation, side-by-side, or section. `region` names a saved inspection
+    region and `hide` lists component IDs or labels to hide for this picture only. Section
+    comparison cuts use the shared part frame in millimetres.
     """
     for shot in shots:  # before the import, so a typo says so instead of "install this"
         _view(shot.get("view", "iso"))
+        mode = shot.get("mode") or "model"
+        if mode not in MODES:
+            raise BuildError(f"no comparison mode {mode!r}. have: {', '.join(MODES)}")
         cut = shot.get("cut")
         if cut and not CUT.match(cut):
             raise BuildError(
@@ -136,7 +144,10 @@ def snapshots(root, shots, timeout=30000):
                     if entry["error"]:
                         raise BuildError(f"{entry['name']}: {entry['error']}")
                     built[name] = [overrides, False]
-                wants_check = shot.get("check") or shot.get("chrome")
+                mode = shot.get("mode") or "model"
+                if mode != "model" and not server.state[name].get("target"):
+                    raise BuildError(f"{name}: {mode} capture needs a reference mesh on the part card")
+                wants_check = shot.get("check") or shot.get("chrome") or mode == "deviation" or shot.get("region")
                 if wants_check and not built[name][1]:
                     # Only when asked for: checking costs about as much as building.
                     server.check(path)
@@ -151,16 +162,18 @@ def snapshots(root, shots, timeout=30000):
                     page.set_viewport_size({"width": width, "height": height})
                 last_size = (width, height)
 
-                url = (
-                    f"http://127.0.0.1:{server.port}/"
-                    f"?part={name}&view={_view(shot.get('view', 'iso'))}"
-                )
+                query = {"part": name, "view": _view(shot.get("view", "iso")), "mode": mode}
                 if not shot.get("chrome"):
-                    url += "&bare=1"
+                    query["bare"] = "1"
                 if shot.get("cut"):
-                    url += f"&cut={shot['cut']}"
+                    query["cut"] = shot["cut"]
                 if shot.get("marks") is False:
-                    url += "&marks=0"
+                    query["marks"] = "0"
+                if shot.get("region"):
+                    query["region"] = shot["region"]
+                if shot.get("hide"):
+                    query["hide"] = ",".join(shot["hide"])
+                url = f"http://127.0.0.1:{server.port}/?{urlencode(query)}"
                 page.goto(url)
                 try:
                     page.wait_for_function(
@@ -176,12 +189,15 @@ def snapshots(root, shots, timeout=30000):
                         f"{timeout / 1000:.0f}s. `ready` comes from an animation frame, "
                         f"so a page that cannot paint never gets there."
                     ) from exc
+                error = page.evaluate("window.__nurb.error || null")
+                if error:
+                    raise BuildError(f"{name}: {error}")
                 png = pathlib.Path(shot["file"])
                 png.parent.mkdir(parents=True, exist_ok=True)
                 # Bare hides the sidebar, so the canvas is the viewport and shooting it
                 # gives exactly the size asked for. With the chrome kept, the sidebar is
                 # part of what was asked for, so shoot the page.
-                target = page if shot.get("chrome") else page.locator("canvas")
+                target = page if shot.get("chrome") else page.locator("main")
                 target.screenshot(path=str(png))
                 written.append(png)
             browser.close()
@@ -190,7 +206,7 @@ def snapshots(root, shots, timeout=30000):
     return written
 
 
-def render(root, paths, out_dir, view=None, size=(1200, 900), chrome=False, timeout=30000, cut=None):
+def render(root, paths, out_dir, view=None, size=(1200, 900), chrome=False, timeout=30000, cut=None, mode="model", region=None, hide=None):
     """Write a PNG per part. Returns [(part_path, png_path)].
 
     A section render gets its own filename, so cutting a part open never overwrites
@@ -203,11 +219,14 @@ def render(root, paths, out_dir, view=None, size=(1200, 900), chrome=False, time
     shots = [
         {
             "part": path,
-            "file": out_dir / f"{pathlib.Path(path).stem}{'.section' if cut else ''}.png",
+            "file": out_dir / f"{pathlib.Path(path).stem}{'.' + mode if mode != 'model' else '.section' if cut else ''}.png",
             "view": view,
             "size": size,
             "chrome": chrome,
             "cut": cut,
+            "mode": mode,
+            "region": region,
+            "hide": hide,
         }
         for path in paths
     ]

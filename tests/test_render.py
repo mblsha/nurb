@@ -81,3 +81,8 @@ def test_a_cut_and_a_computed_view_each_change_the_picture(tmp_path):
         assert len(png) > FLAT * 2, f"{name} is blank, so nothing was drawn"
     assert pngs["whole.png"] != pngs["cut.png"], "the cut removed nothing"
     assert pngs["whole.png"] != pngs["vec.png"], "the view vector did not move the camera"
+
+
+def test_unknown_comparison_mode_is_rejected_before_browser_setup(tmp_path):
+    with pytest.raises(BuildError, match="comparison mode.*have:"):
+        renderer.render(REAL, [PART], tmp_path, mode="guess")

@@ -22,10 +22,7 @@ The joint parameter is an ordinary keyword default, so the viewer's existing sli
 already animates it: drag `open_deg` and the door swings in the browser. Nothing in the
 viewer knows assemblies exist.
 
-`nurb check` on an assembly runs the sweep instead of the printability rules: each
-hinged solid is rotated through its declared range and intersected against everything
-else, and the finding reports the angle where it jams and the coordinates of the
-contact. The printability rules still run where they belong, on the individual parts.
+`nurb check` on an assembly checks declared clearance() pairs at their current pose and sweeps declared hinges through their ranges. Component identities survive placement and rendering so a finding can identify both objects. Printability rules still run where they belong, on the individual parts.
 
 Collision is measured as intersection volume, so two faces that merely kiss at zero
 volume are reported clear; in plastic a zero-clearance pass is already a bind, and the
@@ -35,7 +32,9 @@ carries about width.
 
 import copy
 import functools
+import math
 import pathlib
+import re
 import sys
 from dataclasses import dataclass, field
 
@@ -97,6 +96,35 @@ class Scene:
     obstacles: list = field(default_factory=list)  # context geometry, never printed
     uses: tuple = ()  # the part files use() built, so a watcher can rebuild dependents
     instances: tuple = ()  # each printable use(), including repeats and its overrides
+    components: list = field(default_factory=list)
+    clearances: list = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Component:
+    """One placed object, shared by picking, rendering, and fit findings."""
+
+    id: str
+    label: str
+    role: str
+    solid: object
+    node: str
+    parent: str | None = None
+    group: bool = False
+
+    def wire(self):
+        return {
+            "id": self.id, "label": self.label, "role": self.role,
+            **({"parent": self.parent} if self.parent is not None else {}),
+            **({"group": True} if self.group else {}),
+        }
+
+
+@dataclass(frozen=True)
+class Clearance:
+    first: object
+    second: object
+    minimum: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -140,6 +168,7 @@ class _Recorder:
     obstacles: dict = field(default_factory=dict)  # id(solid) -> name
     uses: set = field(default_factory=set)  # resolved paths use() has built
     instances: list = field(default_factory=list)  # flattened printable bill of materials
+    clearances: list = field(default_factory=list)
 
 
 _active = []  # the recorder for the @assembly call currently executing, if any
@@ -261,7 +290,54 @@ def obstacle(solid, name="an obstacle"):
     rec = _recorder("obstacle()")
     rec.obstacles[id(solid)] = name
     solid.label = name
+    solid._nurb_role = "context"
     return solid
+
+
+def component(solid, name):
+    """Name a placed assembly component for selection and clearance checks."""
+    _recorder("component()")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("component() needs a nonempty name, such as 'camera'")
+    solid.label = name.strip()
+    return solid
+
+
+def clearance(first, second, minimum=0.0):
+    """Require two assembly components to avoid overlap and keep minimum millimetres apart.
+
+    Declare this inside an @assembly function. Pass the placed shapes returned by the
+    assembly, or their unique component names or IDs. Zero permits face contact but
+    never positive-volume overlap. A positive minimum also rejects a smaller gap.
+    This checks the current pose; hinge() declares a separate motion sweep.
+    """
+    rec = _recorder("clearance()")
+    try:
+        minimum = float(minimum)
+    except (TypeError, ValueError):
+        raise ValueError("clearance() minimum must be a finite, nonnegative distance in mm") from None
+    if not math.isfinite(minimum) or minimum < 0:
+        raise ValueError("clearance() minimum must be a finite, nonnegative distance in mm")
+    rec.clearances.append(Clearance(first, second, minimum))
+
+
+def _component_ref(value, components):
+    if isinstance(value, str):
+        matches = [c for c in components if c.label == value or c.id == value]
+    else:
+        matches = [c for c in components if c.solid is value]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise ValueError(
+            f"clearance() component {value!r} is ambiguous; pass its placed shape "
+            "or give each instance a distinct name with component()"
+        )
+    names = ", ".join(c.label for c in components)
+    raise ValueError(
+        f"clearance() component {value!r} was not returned by this assembly; "
+        f"pass a returned placed shape or one of these names: {names}"
+    )
 
 
 def _flatten(result):
@@ -314,13 +390,56 @@ def assembly(fn):
             uses=tuple(sorted(rec.uses)),
             instances=tuple(rec.instances),
         )
+        used_ids = set()
         for s in solids:
+            role = getattr(s, "_nurb_role", "part")
             if id(s) in rec.hinges:
-                scene.hinges.append(rec.hinges[id(s)])
-            elif id(s) in rec.obstacles:
+                h = rec.hinges[id(s)]
+                node = NODE.format(len(scene.hinges))
+                label = h.name
+                scene.hinges.append(h)
+            elif id(s) in rec.obstacles or getattr(s, "_nurb_role", None) == "context":
                 scene.obstacles.append(s)
+                role = "context"
+                label = getattr(s, "label", "") or "obstacle"
+                node = None
             else:
                 scene.statics.append(s)
+                label = getattr(s, "label", "") or "part"
+                node = None
+            base = re.sub(r"[^a-zA-Z0-9_-]+", "_", label).strip("_") or "part"
+            occurrence = 1
+            identity = f"{base}_{occurrence}"
+            while identity in used_ids:
+                occurrence += 1
+                identity = f"{base}_{occurrence}"
+            used_ids.add(identity)
+            nested = getattr(s, "_nurb_scene", None)
+            root = Component(identity, label, role, s, node or f"component_{identity}", group=nested is not None)
+            scene.components.append(root)
+            if nested is not None:
+                # A placed subassembly keeps its children in its original frame.
+                # Apply its outer placement exactly once, while the GLB hierarchy
+                # uses identity groups so an outer hinge can pose all of them.
+                children = {}
+                for child in nested.components:
+                    placed = Component(
+                        f"{identity}/{child.id}", child.label,
+                        "context" if role == "context" else child.role,
+                        s.location * child.solid, f"{root.node}__{child.node}",
+                        parent=f"{identity}/{child.parent}" if child.parent else identity,
+                        group=child.group,
+                    )
+                    scene.components.append(placed)
+                    children[child.id] = placed
+                for fit in nested.clearances:
+                    scene.clearances.append(Clearance(children[fit.first.id], children[fit.second.id], fit.minimum))
+        for fit in rec.clearances:
+            first = _component_ref(fit.first, scene.components)
+            second = _component_ref(fit.second, scene.components)
+            if first is second:
+                raise ValueError("clearance() needs two different assembly components")
+            scene.clearances.append(Clearance(first, second, fit.minimum))
         comp = Compound(children=[copy.copy(s) for s in solids])
         comp._nurb_scene = scene
         return comp
@@ -399,6 +518,38 @@ def _hits(moved, others):
                 label,
             )
     return worst, where
+
+
+def check_clearances(scene, stop=None):
+    """Check declared component pairs at their current pose, without a hinge sweep."""
+    from .checks import FAIL, Finding
+
+    found = []
+    for fit in scene.clearances:
+        if stop and stop():
+            raise Interrupted
+        first, second = fit.first, fit.second
+        volume, overlap = _hits(first.solid, [second.solid])
+        if volume:
+            distance, where = 0.0, overlap[:3]
+        else:
+            distance, a, b = first.solid.distance_to_with_closest_points(second.solid)
+            where = tuple((a + b).multiply(0.5))
+        if not volume and distance + 1e-7 >= fit.minimum:
+            continue
+        pair = f"{first.label} and {second.label}"
+        if first.label == second.label:
+            pair = f"{first.label} ({first.id}) and {second.label} ({second.id})"
+        if volume:
+            message = f"{pair} overlap by {volume:.3f} mm3; required clearance {fit.minimum:g} mm"
+        else:
+            message = f"{pair} have {distance:.3f} mm clearance; require at least {fit.minimum:g} mm"
+        found.append(Finding(
+            "clearance", FAIL, message, value=distance, where=where,
+            components=(first.id, second.id),
+            measurements={"clearance_mm": distance, "minimum_mm": fit.minimum, "overlap_mm3": volume},
+        ))
+    return found
 
 
 def _limit(h, others, direction, stop=None):

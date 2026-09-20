@@ -173,7 +173,7 @@ async fn create_reference_project(
             let copied = reference::copy_source(&dir, &PathBuf::from(source))?;
             // Read the saved copy so a changed source cannot give the new part stale bounds.
             let info = reference::inspect(&launcher, &copied)?;
-            reference::write_part(&dir, &module, &units, tolerance_mm, &info)
+            reference::write_part(&dir, &module, &units, tolerance_mm, &info, &copied)
         })();
         if let Err(error) = result {
             let _ = std::fs::remove_dir_all(&dir);

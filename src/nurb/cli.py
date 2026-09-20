@@ -859,10 +859,17 @@ def cmd_scan(args):
         sys.exit(f"  {exc}")
     cuts = []
     try:
-        for spec in args.section or []:
+        for spec in args.section or (["x", "y", "z"] if getattr(args, "summary", False) else []):
             cuts.append(scan.section(mesh, spec, tolerance=args.tolerance))
     except ValueError as exc:
         sys.exit(f"  {exc}")
+    if getattr(args, "summary", False):
+        if args.json:
+            print(json.dumps(scan.inspection(args.file, mesh, cuts), indent=2, allow_nan=False))
+        else:
+            for line in scan.inspection_report(args.file, mesh, unit, source, cuts):
+                print(line)
+        return
     if args.json:
         print(
             json.dumps(
@@ -880,6 +887,24 @@ def cmd_scan(args):
             print(line)
 
 
+def _inspection_region(value):
+    from . import compare
+
+    try:
+        name, selector = value.split("=", 1)
+        if selector.startswith("@"):
+            region = {"name": name, "component": selector[1:]}
+        else:
+            low, high = selector.split(":", 1)
+            region = {"name": name, "bounds_mm": {
+                "min": [float(v) for v in low.split(",")],
+                "max": [float(v) for v in high.split(",")],
+            }}
+        return compare.inspection_regions([region])[0]
+    except ValueError as exc:
+        raise ValueError(f"region {value!r}: use NAME=x0,y0,z0:x1,y1,z1 or NAME=@component ({exc})") from exc
+
+
 def cmd_compare(args):
     """Measure a part against the mesh it is remodelling, both directions.
 
@@ -892,6 +917,11 @@ def cmd_compare(args):
     named = args.part is not None
     output = []
     skipped = []
+    try:
+        explicit_regions = [_inspection_region(value) for value in getattr(args, "region", None) or []]
+        datum = json.loads(args.datum) if getattr(args, "datum", None) else None
+    except (ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"  {exc}")
     for path in _resolve(root, args.part):
         try:
             declared = compare.setting(checks.settings(path))
@@ -906,6 +936,13 @@ def cmd_compare(args):
             and _reference_path(root, args.against) == _reference_path(root, declared["file"])
         )
         inherited = declared if declared and (not args.against or same_reference) else None
+        regions = list(inherited.get("regions", [])) if inherited else []
+        for region in explicit_regions:
+            regions = [existing for existing in regions if existing["name"] != region["name"]] + [region]
+        if getattr(args, "save_regions", False):
+            if not inherited:
+                sys.exit("  --save-regions requires the card's declared reference")
+            compare.update_card(path, regions=regions)
         if args.against:
             file = args.against
         elif declared:
@@ -993,11 +1030,18 @@ def cmd_compare(args):
                     shape, _, _ = builder.build(
                         path, overrides=overrides or None, draft=False
                     )
+                    active_transform = transform
+                    if datum and not saved:
+                        if active_transform is None:
+                            active_transform = compare.centered_transform(builder.to_mesh(shape), mesh)
+                        active_transform = compare.datum_alignment(active_transform, datum)["transform"]
+                        applied_alignment = "datum"
                     metrics = compare.against(
                         shape,
                         mesh,
                         tolerance_mm=tolerance_mm,
-                        transform=transform,
+                        transform=active_transform,
+                        regions=regions,
                     )
                 metrics["alignment"] = applied_alignment
             except (ValueError, builder.BuildError) as exc:
@@ -1065,6 +1109,7 @@ def cmd_compare(args):
                 },
                 "detected_above_tolerance": metrics["detected_above_tolerance"],
                 "worst_regions": metrics["worst_regions"],
+                "inspection_regions": metrics.get("inspection_regions", []),
             }
             output.append(result)
             if not args.json:
@@ -1439,6 +1484,8 @@ def cmd_render(args):
     from . import builder, render
 
     root = project_root()
+    if getattr(args, "mode", "model") == "section" and not args.section:
+        sys.exit("  --mode section needs --section AXIS[:POS] in the aligned part frame")
     try:
         written = render.render(
             root,
@@ -1448,6 +1495,9 @@ def cmd_render(args):
             size=(args.width, args.height),
             chrome=args.chrome,
             cut=args.section,
+            mode=getattr(args, "mode", "model"),
+            region=getattr(args, "region", None),
+            hide=getattr(args, "hide", None),
         )
     except builder.BuildError as exc:
         sys.exit(f"  {exc}")
@@ -1614,7 +1664,7 @@ def main(argv=None):
     s = sub.add_parser("new", help="create a part")
     s.add_argument("name")
     s.add_argument("--root", help=argparse.SUPPRESS)
-    s.add_argument("--from", dest="reference", metavar="MESH", help="start a reconstruction from this STL, OBJ, GLB, or triangulated PLY reference")
+    s.add_argument("--from", dest="reference", metavar="MESH", help="start a reconstruction from this STL, OBJ, GLB, or triangulated PLY/PLY.GZ reference")
     s.add_argument("--units", choices=("mm", "cm", "m", "in"), help="the reference file's confirmed units")
     s.add_argument("--tolerance", type=float, help="acceptable surface deviation in mm (default 0.1)")
     s.add_argument(
@@ -1663,9 +1713,9 @@ def main(argv=None):
     s.set_defaults(fn=cmd_inspect)
 
     s = sub.add_parser(
-        "scan", help="measure a mesh in mm, a phone scan or a downloaded model (STL/OBJ/GLB or triangulated PLY)"
+        "scan", help="inspect a mesh or analytic reference in mm (STL/OBJ/GLB/PLY/PLY.GZ/STEP/B-rep)"
     )
-    s.add_argument("file", help="the mesh: a scan app export, or a model downloaded to measure")
+    s.add_argument("file", help="the reference: a scan, downloaded mesh, STEP, or B-rep model")
     s.add_argument(
         "--units",
         choices=("mm", "cm", "m", "in"),
@@ -1682,6 +1732,7 @@ def main(argv=None):
         help="simplify the profile to this many mm (default 0.2)",
     )
     s.add_argument("--json", action="store_true", help="write complete bounds, fits, and untruncated sections")
+    s.add_argument("--summary", action="store_true", help="compact reference features and section fits; STEP/B-rep includes exact faces, axes, and section areas")
     s.set_defaults(fn=cmd_scan)
 
     s = sub.add_parser(
@@ -1714,6 +1765,9 @@ def main(argv=None):
         help="store the applied transform for the card's declared reference",
     )
     s.add_argument("--json", action="store_true", help="write complete structured comparison evidence")
+    s.add_argument("--region", action="append", metavar="NAME=BOX", help="inspect NAME=x0,y0,z0:x1,y1,z1 in part mm, or NAME=@component; repeat to name regions")
+    s.add_argument("--save-regions", action="store_true", help="persist the named inspection regions in the reference card")
+    s.add_argument("--datum", metavar="JSON", help='preview plane, axis, or landmarks alignment in the current part frame; combine with --save-alignment to persist')
     s.set_defaults(fn=cmd_compare)
 
     s = sub.add_parser("skill", help="print an agent skill file for your AI harness")
@@ -1772,6 +1826,9 @@ def main(argv=None):
     s.add_argument("--width", type=int, default=1200)
     s.add_argument("--height", type=int, default=900)
     s.add_argument("--chrome", action="store_true", help="keep the HUD and findings panel")
+    s.add_argument("--mode", choices=("model", "reference", "overlay", "deviation", "side-by-side", "section"), default="model", help="capture CAD, reference, overlay, deviation, matched views, or filled section comparison (requires --section)")
+    s.add_argument("--region", metavar="NAME", help="frame a named inspection region from the reference card")
+    s.add_argument("--hide", action="append", metavar="COMPONENT", help="hide a component ID or label in this capture; repeat as needed")
     s.add_argument(
         "--section",
         metavar="AXIS[:POS]",

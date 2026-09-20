@@ -22,7 +22,7 @@ import { COLUMNS, fitColumns, initialColumns, resizedColumn } from "./layout";
 import { createLatestRequestGate } from "./latestRequest";
 import Logo from "./Logo";
 import ReferenceProjectDialog from "./ReferenceProjectDialog";
-import { reconstructionPrompt, type PartReference, type ReferenceProject } from "./referenceProject";
+import { reconstructionPrompt, referenceMeshSuffix, type PartReference, type ReferenceProject } from "./referenceProject";
 import type { Column } from "./layout";
 import { partMessage, type PartConfigurationRequest } from "./partMessages";
 import { createPartRecovery } from "./partRecovery";
@@ -705,10 +705,14 @@ function App() {
     if (name) createNamed(name);
   };
 
-  const newFromStl = async () => {
+  const newFromMesh = async () => {
     try {
-      const source = await pickFolder({ title: "Choose the original STL", directory: false, multiple: false, filters: [{ name: "STL mesh", extensions: ["stl"] }] });
+      const source = await pickFolder({ title: "Choose the original mesh", directory: false, multiple: false, filters: [{ name: "STL or PLY mesh (including .ply.gz)", extensions: ["stl", "ply", "gz"] }] });
       if (typeof source !== "string") return;
+      if (!referenceMeshSuffix(source)) {
+        setError("Choose an STL, PLY, or .ply.gz mesh reference.");
+        return;
+      }
       setReferenceError(null);
       setReferenceSource(source);
     } catch (failure) {
@@ -1299,9 +1303,9 @@ function App() {
             </div>
           ))}
         </div>
-        <button className="rail-add" onClick={newFromStl}>
+        <button className="rail-add" onClick={newFromMesh}>
           <IconCube />
-          new from STL…
+          new from mesh…
         </button>
         <button className="rail-add" onClick={addExisting}>
           <IconFolderPlus />
@@ -1515,8 +1519,8 @@ function App() {
                   {creating ? "creating…" : "create"}
                 </button>
               </form>
-              <button className="welcome-existing" onClick={newFromStl}>
-                new from STL…
+              <button className="welcome-existing" onClick={newFromMesh}>
+                new from mesh…
               </button>
               <button className="welcome-existing" onClick={addExisting}>
                 or add an existing folder…

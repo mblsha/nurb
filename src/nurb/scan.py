@@ -14,8 +14,11 @@ part a thousand times off that still builds, so the guess is stated in the repor
 overridable rather than silent.
 """
 
+import gzip
+import io
 import pathlib
 import re
+import zlib
 from collections import defaultdict
 
 import numpy as np
@@ -49,6 +52,38 @@ CUT = re.compile(r"^[xyz](:-?\d*\.?\d+(mm)?)?$")
 # fold-overs each shed a chain a few segments long. Anything shorter than this
 # fraction of the longest chain is reported as a count instead of listed.
 FRAGMENT = 0.02
+EXACT_FORMATS = {".step", ".stp", ".brep"}
+PLY_GZIP_LIMIT = 256 * 1024 * 1024
+
+
+def reference_suffix(path):
+    """Keep the supported compound extension when choosing a parser or a filename."""
+    path = pathlib.Path(path)
+    return ".ply.gz" if path.name.lower().endswith(".ply.gz") else path.suffix.lower()
+
+
+def decompress_ply(source, filename):
+    """Bound expanded bytes before a compressed reference reaches the mesh parser."""
+    try:
+        with gzip.GzipFile(fileobj=source, mode="rb") as compressed:
+            body = compressed.read(PLY_GZIP_LIMIT + 1)
+    except (OSError, EOFError, zlib.error) as exc:
+        raise ValueError(
+            f"{filename}: invalid or incomplete gzip data; export the PLY again or recompress a valid PLY file"
+        ) from exc
+    if len(body) > PLY_GZIP_LIMIT:
+        raise ValueError(
+            f"{filename}: expanded PLY exceeds the {PLY_GZIP_LIMIT / (1024 * 1024):g} MiB decompression limit; simplify the mesh and export it again"
+        )
+    return body
+
+
+def exact_shape(path):
+    """Read analytic reference geometry through the already installed CAD kernel."""
+    from build123d import import_brep, import_step
+
+    path = pathlib.Path(path)
+    return import_brep(path) if path.suffix.lower() == ".brep" else import_step(path)
 
 
 def load(path, units=None):
@@ -58,6 +93,15 @@ def load(path, units=None):
     path = pathlib.Path(path)
     if not path.is_file():
         raise ValueError(f"no file at {path}")
+    if path.suffix.lower() in EXACT_FORMATS:
+        from .builder import to_mesh
+
+        if units not in (None, "mm"):
+            raise ValueError("STEP and B-rep are read by the CAD kernel in millimetres; use --units mm or omit it")
+        try:
+            return to_mesh(exact_shape(path), tolerance=0.01), "mm", "file"
+        except Exception as exc:
+            raise ValueError(f"{path.name}: could not read analytic geometry: {exc}") from exc
     if path.suffix.lower() == ".3mf":
         # As common as STL on the model sites, and trimesh reads it only with networkx
         # installed. "No module named 'networkx'" is not something a user can act on,
@@ -66,8 +110,15 @@ def load(path, units=None):
             f"{path.name} is a 3MF, which nurb does not read. Open it in your slicer "
             f"and export the plate as STL, then run this on that file"
         )
+    compressed_ply = reference_suffix(path) == ".ply.gz"
+    if compressed_ply:
+        with path.open("rb") as source:
+            body = decompress_ply(source, path.name)
     try:
-        mesh = trimesh.load(str(path), force="mesh")
+        if compressed_ply:
+            mesh = trimesh.load(io.BytesIO(body), file_type="ply", force="mesh", resolver={}, skip_materials=True)
+        else:
+            mesh = trimesh.load(str(path), force="mesh")
     except Exception as exc:
         raise ValueError(f"{path.name}: {exc}") from exc
     if not hasattr(mesh, "faces") or len(mesh.faces) == 0:
@@ -124,7 +175,10 @@ def report(path, mesh, unit, source):
         lines.append(f"      read as {LONG[unit]} (--units)")
     lines.append(f"      reconstruction bounds: x {low[0]:.6g} to {high[0]:.6g}, y {low[1]:.6g} to {high[1]:.6g}, z {low[2]:.6g} to {high[2]:.6g} mm; center {tuple(float(v) for v in mesh.bounds.mean(axis=0))}")
     lines.append("      comparison reference: usable with nurb compare even when solid conversion is unavailable")
-    lines.append(f"      optional faceted solid: {_solid_line(path, mesh, unit, source)}")
+    if path.suffix.lower() in EXACT_FORMATS:
+        lines.append("      analytic B-rep is available; curves and planar faces retain their exact CAD representation")
+    else:
+        lines.append(f"      optional faceted solid: {_solid_line(path, mesh, unit, source)}")
     return lines
 
 
@@ -132,7 +186,7 @@ def structured(path, mesh, unit, source, sections=()):
     """Complete machine-readable measurements in the mesh's millimetre frame."""
     path = pathlib.Path(path)
     low, high = mesh.bounds
-    return {
+    result = {
         "schema_version": 1,
         "file": str(path.resolve()),
         "units": {
@@ -162,6 +216,108 @@ def structured(path, mesh, unit, source, sections=()):
         "solid_conversion": _solid_facts(path, mesh, unit, source),
         "sections": [_section_structured(cut) for cut in sections],
     }
+    result["inspection"] = inspection(path, mesh, sections)
+    return result
+
+
+def inspection(path, mesh, sections=()):
+    """A bounded feature summary; full polylines remain in the structured sections."""
+    result = {
+        "frame": "source_mm",
+        "units": "mm",
+        "bounds_mm": {"min": mesh.bounds[0].tolist(), "max": mesh.bounds[1].tolist()},
+        "extents_mm": mesh.extents.tolist(),
+        "watertight": bool(mesh.is_watertight),
+        "plane": _largest_planar_region_fit(mesh),
+        "sections": [],
+    }
+    for cut in sections:
+        complete = _section_structured(cut)
+        result["sections"].append({
+            "axis": complete["axis"], "position_mm": complete["position_mm"],
+            "plane_axes": complete["plane_axes"], "loop_count": len(complete["loops"]),
+            "open_count": sum(not loop["closed"] for loop in complete["loops"]),
+            "noise_candidate_count": cut["skipped"],
+            "omitted_feature_count": max(0, len(complete["loops"]) - cut["skipped"] - 24),
+            "features": [
+                {key: loop[key] for key in ("closed", "bounds_mm", "fits", "cylinder_candidate") if key in loop}
+                for loop in complete["loops"] if not loop["noise_candidate"]
+            ][:24],
+        })
+    if pathlib.Path(path).suffix.lower() in EXACT_FORMATS:
+        result["analytic"] = analytic_inspection(exact_shape(path), sections)
+    return result
+
+
+def analytic_inspection(shape, sections=()):
+    """Exact CAD bounds, analytic datums, and section areas, with no mesh fitting."""
+    from build123d import GeomType, Plane, Vector, section as cad_section
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+
+    def xyz(value):
+        return [float(value.X), float(value.Y), float(value.Z)]
+
+    bounds = shape.bounding_box()
+    faces = []
+    for index, face in enumerate(shape.faces()):
+        record = {"face": index, "kind": face.geom_type.name.lower(), "area_mm2": float(face.area)}
+        if face.geom_type == GeomType.PLANE:
+            record.update({"origin_mm": xyz(face.center()), "normal": xyz(face.normal_at())})
+        elif face.geom_type == GeomType.CYLINDER:
+            axis = face.axis_of_rotation
+            point = face.position_at(0.25, 0.5)
+            delta = point - axis.position
+            radial = delta - axis.direction * delta.dot(axis.direction)
+            surface = BRepAdaptor_Surface(face.wrapped)
+            full = bool(np.isclose(surface.LastUParameter() - surface.FirstUParameter(), 2 * np.pi))
+            interior = face.normal_at(point).dot(radial) < 0
+            record.update({
+                "origin_mm": xyz(axis.position), "direction": xyz(axis.direction),
+                "radius_mm": float(face.radius),
+                "surface": "bore" if interior and full else "concave cylinder" if interior else "exterior",
+                "closed_circumference": full,
+            })
+        faces.append(record)
+    cuts = []
+    for cut in sections:
+        plane = Plane(origin=Vector(*cut["origin"]), z_dir=Vector(*cut["normal"]))
+        cross = cad_section(shape, section_by=plane)
+        cuts.append({
+            "axis": cut["axis"], "position_mm": cut["pos"], "area_mm2": float(cross.area),
+            "faces": [{"area_mm2": float(face.area), "hole_count": len(face.inner_wires()),
+                       "perimeter_mm": float(sum(wire.length for wire in face.wires()))}
+                      for face in cross.faces()],
+        })
+    return {"bounds_mm": {"min": xyz(bounds.min), "max": xyz(bounds.max)},
+            "volume_mm3": float(shape.volume), "faces": faces, "sections": cuts,
+            "method": "analytic B-rep; face IDs are local to this reference file"}
+
+
+def inspection_report(path, mesh, unit, source, sections=()):
+    """Human-readable feature summary without dumping every profile vertex."""
+    result = inspection(path, mesh, sections)
+    lines = report(path, mesh, unit, source)
+    if result["plane"]:
+        plane = result["plane"]
+        lines.append(f"  largest planar region: origin {plane['origin_mm']}, normal {plane['normal']}; area {plane['area_mm2']:.3f}mm², fit residual {plane['max_residual_mm']:.4f}mm")
+    for cut in result["sections"]:
+        lines.append(f"  section {cut['axis']}={cut['position_mm']:.3f}mm: {cut['loop_count']} loops, {cut['open_count']} open; {cut['noise_candidate_count']} noise candidates")
+        for feature in cut["features"]:
+            cylinder = feature.get("cylinder_candidate")
+            if cylinder:
+                lines.append(f"      circle radius {cylinder['radius_mm']:.3f}mm, center {cylinder['axis_point_mm']}, fit residual {cylinder['max_residual_mm']:.4f}mm")
+    analytic = result.get("analytic")
+    if analytic:
+        planes = sum(face["kind"] == "plane" for face in analytic["faces"])
+        cylinders = [face for face in analytic["faces"] if face["kind"] == "cylinder"]
+        lines.append(f"  analytic B-rep: {planes} planar faces, {len(cylinders)} cylindrical faces")
+        for face in sorted((f for f in analytic["faces"] if f["kind"] == "plane"), key=lambda f: -f["area_mm2"])[:6]:
+            lines.append(f"      face {face['face']}: plane origin {face['origin_mm']}, normal {face['normal']}; area {face['area_mm2']:.3f}mm²")
+        for face in cylinders[:24]:
+            lines.append(f"      face {face['face']}: {face['surface']}, radius {face['radius_mm']:.3f}mm; axis {face['origin_mm']} + t*{face['direction']}")
+        for cut in analytic["sections"]:
+            lines.append(f"      exact {cut['axis']}={cut['position_mm']:.3f}mm section: material area {cut['area_mm2']:.4f}mm²")
+    return lines
 
 
 def _solid_line(path, mesh, unit, source):
@@ -179,7 +335,7 @@ def _solid_line(path, mesh, unit, source):
     """
     from . import mesh as mesh_module
 
-    problem = mesh_module.refusal(path.suffix, mesh)
+    problem = mesh_module.refusal(reference_suffix(path), mesh)
     if problem:
         return (
             f"no solid from this one: it is {problem}. "
@@ -203,7 +359,9 @@ def _solid_line(path, mesh, unit, source):
 def _solid_facts(path, mesh, unit, source):
     from . import mesh as mesh_module
 
-    problem = mesh_module.refusal(path.suffix, mesh)
+    if path.suffix.lower() in EXACT_FORMATS:
+        return {"available": True, "reason": None, "representation": "analytic"}
+    problem = mesh_module.refusal(reference_suffix(path), mesh)
     if problem:
         return {"available": False, "reason": problem, "representation": None}
     solid, problem = mesh_module.conversion(path)

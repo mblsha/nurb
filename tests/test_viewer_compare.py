@@ -162,6 +162,7 @@ def test_alignment_controls_preview_before_persisting_rigid_transforms():
         "reference.matrixAutoUpdate = false; reference.matrix.set(...transform); mesh.add(cad, reference);\n"
         "function compareInvalidate(reason) { comparePending.set(current, {reason, token: entry.token}); }\n"
         "function compareClear() {} function comparePanel() {}\n"
+        + function("function componentInfo(", "function inspectionSave(")
         + align
         + """
 compareAlignment('lock');
@@ -216,7 +217,7 @@ def test_compare_is_discoverable_without_a_reference_and_labels_coverage_as_esti
     assert 'id="compareremove"' in VIEWER
     assert "estimated within" in VIEWER
     assert "Apply alignment" in VIEWER
-    assert 'accept=".stl,.obj,.glb,.ply"' in VIEWER
+    assert 'accept=".stl,.obj,.glb,.ply,.ply.gz,.step,.stp,.brep"' in VIEWER
     assert ".3mf" not in VIEWER.split('id="compareref"', 1)[1].split(">", 1)[0]
 
 

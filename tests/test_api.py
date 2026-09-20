@@ -30,8 +30,7 @@ def test_own_names_are_whatever_init_adds_to_build123d():
 
 
 def test_the_documented_vocabulary_is_the_exported_one():
-    """What the doctrine names in prose: part, polish, the convexity pair, measured,
-    and the assembly four."""
+    """The documented vocabulary includes component identity and assembly fit."""
     assert set(api.own_names()) == {
         "part",
         "reject",
@@ -43,6 +42,8 @@ def test_the_documented_vocabulary_is_the_exported_one():
         "stand",
         "counterbore",
         "assembly",
+        "component",
+        "clearance",
         "use",
         "hinge",
         "obstacle",

@@ -16,6 +16,8 @@ nurb compare offset_bracket --json
 
 Open **compare** in the viewer. The default disk has near-zero excess beyond tolerance even though raw surface distances are nonzero. Select `oversized` to see lower coverage and colored samples on the cylinder's sides. The CAD and reference map buttons inspect the two unsigned directions independently. `nurb compare disk` reports both the default and the variant.
 
+The same panel can save a named inspection box or assembly component, so a functional interface keeps its own bidirectional result even when an intentionally simplified exterior dominates the global score. Section mode applies one part-frame plane to both bodies and shows shared, CAD-only, and reference-only material in a matched orthographic view. Model, reference, overlay, deviation, side-by-side, and section views can also be captured with `nurb render --mode`; use `--region NAME` to frame a saved region and repeat `--hide COMPONENT` to omit assembly context without changing geometry.
+
 For `offset_bracket`, keep the stored identity frame and inspect the base holes, side hole and locator notch. The default must remain inside its 0.12mm band. The `missing_locator` variant must report detected deviation above tolerance and locate it at the reference notch rather than allowing high overall coverage to imply success.
 
 Measure it without writing a mesh-specific probe:

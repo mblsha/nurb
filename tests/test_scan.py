@@ -5,6 +5,7 @@ metres, because that is what Scaniverse and Polycam export. The profile is a kno
 staircase so the section has exact numbers to recover.
 """
 
+import gzip
 import json
 
 import numpy as np
@@ -43,6 +44,62 @@ def test_a_metre_scale_mesh_is_read_as_metres(tmp_path):
     mesh, unit, source = scan.load(sheet(tmp_path))
     assert (unit, source) == ("m", "guess")
     assert mesh.extents.max() == pytest.approx(300.0, abs=0.01)
+
+
+@pytest.mark.parametrize("encoding", ["ascii", "binary_little_endian"])
+@pytest.mark.parametrize("suffix", [".ply.gz", ".PLY.GZ"])
+def test_compressed_ply_matches_uncompressed_geometry_and_units(tmp_path, encoding, suffix):
+    body = trimesh.creation.box(extents=(4, 2, 1)).export(file_type="ply", encoding=encoding)
+    target = tmp_path / f"reference{suffix}"
+    target.write_bytes(gzip.compress(body))
+    mesh, unit, source = scan.load(target, units="cm")
+    assert (unit, source) == ("cm", "argument")
+    assert mesh.extents == pytest.approx((40, 20, 10))
+    assert mesh.is_watertight
+    assert "it is a .ply.gz" in scan.report(target, mesh, unit, source)[-1]
+
+
+@pytest.mark.parametrize("body", [b"not gzip", gzip.compress(b"ply\n")[:-4]])
+def test_invalid_compressed_ply_names_how_to_recover(tmp_path, body):
+    target = tmp_path / "broken.ply.gz"
+    target.write_bytes(body)
+    with pytest.raises(ValueError, match="invalid or incomplete gzip.*export the PLY again"):
+        scan.load(target)
+
+
+def test_compressed_point_cloud_keeps_the_mesh_mode_guidance(tmp_path):
+    target = tmp_path / "points.ply.gz"
+    body = trimesh.points.PointCloud(np.zeros((4, 3))).export(file_type="ply")
+    target.write_bytes(gzip.compress(body))
+    with pytest.raises(ValueError, match="only points.*mesh mode"):
+        scan.load(target)
+
+
+def test_compressed_ply_stops_expansion_before_parsing(tmp_path, monkeypatch):
+    monkeypatch.setattr(scan, "PLY_GZIP_LIMIT", 1024)
+    target = tmp_path / "oversized.ply.gz"
+    target.write_bytes(gzip.compress(b"0" * 1025))
+    monkeypatch.setattr(trimesh, "load", lambda *a, **kw: pytest.fail("oversized data reached the mesh parser"))
+    with pytest.raises(ValueError, match="expanded PLY exceeds.*simplify the mesh"):
+        scan.load(target)
+
+
+@pytest.mark.parametrize("name", ["mesh.gz", "mesh.obj.gz", "mesh.ply.gz.extra"])
+def test_only_the_supported_compound_extension_enables_gzip(name):
+    assert scan.reference_suffix(name) != ".ply.gz"
+
+
+def test_scan_compressed_ply_json_includes_sections_and_inspection(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "box.ply.gz"
+    target.write_bytes(gzip.compress(trimesh.creation.box(extents=(40, 20, 10)).export(file_type="ply")))
+    monkeypatch.chdir(tmp_path)
+    cli.main(["scan", str(target), "--units", "mm", "--section", "z", "--json"])
+    result = json.loads(capsys.readouterr().out)
+    assert result["file"] == str(target)
+    assert result["mesh"]["extents_mm"] == [40, 20, 10]
+    assert result["sections"][0]["loops"][0]["closed"] is True
+    assert result["inspection"]["sections"][0]["loop_count"] == 1
+    assert result["comparison_reference"]["usable"] is True
 
 
 def test_a_millimetre_mesh_stays_millimetres(tmp_path):

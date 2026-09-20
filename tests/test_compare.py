@@ -3,6 +3,7 @@ never blur. A part that grew a boss the original lacks must show up as "part off
 target" even while every target sample sits happily on the part."""
 
 import asyncio
+import gzip
 import json
 import pathlib
 from types import SimpleNamespace
@@ -426,6 +427,31 @@ def test_new_from_mesh_copies_the_reference_and_persists_confirmed_units(tmp_pat
     assert target["transform"] == compare.IDENTITY
     source_text = (root / "parts" / "thing.py").read_text()
     assert "width=40.0, depth=30.0, height=10.0" in source_text
+
+
+def test_compressed_ply_new_project_compares_with_its_saved_reference(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "source.PLY.GZ"
+    body = gzip.compress(trimesh.creation.box(extents=[40, 30, 10]).export(file_type="ply"))
+    source.write_bytes(body)
+    root = tmp_path / "project"
+    cli.main(["new", "thing", "--root", str(root), "--from", str(source), "--units", "mm"])
+    capsys.readouterr()
+    part = root / "parts" / "thing.py"
+    target = compare.setting(checks.settings(part))
+    assert target["file"] == "scans/source.PLY.GZ"
+    assert (root / target["file"]).read_bytes() == body
+    assert target["transform"] == compare.IDENTITY
+    monkeypatch.chdir(root)
+    for arguments in ([], ["--against", target["file"]]):
+        cli.main(["compare", "thing", *arguments, "--json"])
+        result = json.loads(capsys.readouterr().out)["comparisons"][0]
+        assert result["reference"]["matches_declared_reference"] is True
+        assert result["directions"]["part_to_target"]["sampled_max"] < 1e-6
+        assert result["directions"]["target_to_part"]["sampled_max"] < 1e-6
+    server = Server(root)
+    entry = server.rebuild(part)
+    assert entry["target"]["file"] == target["file"]
+    assert entry["target_glb"][:4] == b"glTF"
 
 
 def test_new_from_an_open_planar_reference_starts_with_a_valid_thin_solid(tmp_path):
