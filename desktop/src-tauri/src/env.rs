@@ -52,6 +52,21 @@ impl Launcher {
         }
     }
 
+    /// Python from the same environment as the engine, including its mesh readers.
+    pub fn python(&self) -> Command {
+        match self {
+            Self::Checkout { repo } => {
+                let mut command = Command::new("uv");
+                command
+                    .args(["run", "--frozen", "--project"])
+                    .arg(repo)
+                    .arg("python");
+                command
+            }
+            Self::Provisioned { paths } => Command::new(paths.venv_python()),
+        }
+    }
+
     /// Program and arguments that run an agent's ACP process. Native CLIs
     /// (Cursor, Grok) are the user's own install and spawn the same way in
     /// both modes. Provisioned adapters are spawned as `node <script>` rather

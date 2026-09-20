@@ -3,6 +3,7 @@ mod agents;
 mod env;
 mod prefs;
 mod provision;
+mod reference;
 mod registry;
 mod sessions;
 mod supervisor;
@@ -115,6 +116,75 @@ async fn create_project(
     .map_err(|e| e.to_string())??;
     let registry = app.state::<Registry>();
     registry.upsert(&name, &created, Some(module));
+    Ok(created.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+async fn inspect_reference(
+    app: AppHandle,
+    source: String,
+) -> Result<reference::ReferenceInfo, String> {
+    let launcher = app.state::<env::Launcher>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        reference::inspect(&launcher, &PathBuf::from(source))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn create_reference_project(
+    app: AppHandle,
+    name: String,
+    folder: Option<String>,
+    source: String,
+    units: String,
+    tolerance_mm: f64,
+) -> Result<String, String> {
+    let name = name.trim().to_string();
+    if name.is_empty()
+        || name.contains(['/', '\\'])
+        || name.starts_with('.')
+        || name.chars().any(char::is_control)
+    {
+        return Err("Choose a project name without slashes or a leading dot.".into());
+    }
+    reference::unit_factor(&units)?;
+    reference::validate_tolerance(tolerance_mm)?;
+    let base = project_base(folder, default_projects_folder_path(&app)?);
+    let dir = base.join(&name);
+    let part = seed_part_name(&name);
+    let module = part.replace('-', "_");
+    let selected_part = module.clone();
+    let launcher = app.state::<env::Launcher>().inner().clone();
+    let created = tauri::async_runtime::spawn_blocking(move || -> Result<PathBuf, String> {
+        std::fs::create_dir_all(&base)
+            .map_err(|e| format!("Could not create the projects folder: {e}"))?;
+        // Claim a new directory atomically so cleanup never removes an existing project.
+        std::fs::create_dir(&dir).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                "A project with that name already exists. Choose another name.".to_string()
+            } else {
+                format!("Could not create the project folder: {e}")
+            }
+        })?;
+        let result = (|| {
+            seed(&launcher, &dir, &part)?;
+            let copied = reference::copy_source(&dir, &PathBuf::from(source))?;
+            // Read the saved copy so a changed source cannot give the new part stale bounds.
+            let info = reference::inspect(&launcher, &copied)?;
+            reference::write_part(&dir, &module, &units, tolerance_mm, &info)
+        })();
+        if let Err(error) = result {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(error);
+        }
+        Ok(dir)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    app.state::<Registry>()
+        .upsert(&name, &created, Some(selected_part));
     Ok(created.to_string_lossy().into_owned())
 }
 
@@ -395,7 +465,29 @@ fn part_views(project: &std::path::Path, body: &str) -> Result<serde_json::Value
                     .and_then(|entry| entry.get("variant"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                serde_json::json!({ "name": name, "error": error, "refused": refused, "assembly": assembly, "uses": uses, "variants": variants, "variant": variant })
+                // Keep the rail payload small: comparison samples can contain
+                // thousands of points, while the shell only needs this summary.
+                let target = entry
+                    .and_then(|entry| entry.get("target"))
+                    .and_then(|target| target.as_object())
+                    .map(|target| {
+                        let mut summary = serde_json::Map::new();
+                        for key in ["file", "units", "tolerance_mm", "transform", "alignment", "error"] {
+                            if let Some(value) = target.get(key) {
+                                summary.insert(key.into(), value.clone());
+                            }
+                        }
+                        serde_json::Value::Object(summary)
+                    })
+                    .unwrap_or(serde_json::Value::Null);
+                // The Python server parses this root card setting, including
+                // comments and either TOML quote style.
+                let reconstruction = entry
+                    .and_then(|entry| entry.get("reconstruction"))
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                serde_json::json!({ "name": name, "error": error, "refused": refused, "assembly": assembly, "uses": uses, "variants": variants, "variant": variant, "target": target, "reconstruction": reconstruction })
             })
             .collect(),
     ))
@@ -537,6 +629,8 @@ pub fn run() {
             list_projects,
             default_projects_folder,
             create_project,
+            inspect_reference,
+            create_reference_project,
             add_project,
             add_projects_from_folder,
             remove_project,
@@ -691,13 +785,15 @@ mod tests {
         std::fs::write(parts.join("_helper.py"), "").unwrap();
 
         std::fs::write(parts.join("held.py"), "").unwrap();
-
         let views = part_views(
             &root,
             r#"[{"name":"broken","error":"trace"},{"name":"gone","error":null},
                 {"name":"held","error":"hole too small","refused":"hole"},
-                {"name":"alpha","error":null,"variant":"tall",
-                 "variants":[{"name":"tall","params":{"height":200.0},"note":"the pantry"}]},
+                {"name":"alpha","error":null,"variant":"tall","reconstruction":"bounding_box_draft",
+                 "variants":[{"name":"tall","params":{"height":200.0},"note":"the pantry"}],
+                 "target":{"file":"scans/original.stl","units":"mm","tolerance_mm":0.1,
+                           "alignment":"stored","metrics":{"samples":[1,2,3]},
+                           "transform":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]}},
                 {"name":"rig","error":null,"joints":[],"uses":["alpha"]}]"#,
         )
         .unwrap();
@@ -707,10 +803,12 @@ mod tests {
             serde_json::json!([
                 { "name": "alpha", "error": null, "refused": false, "assembly": false, "uses": [],
                   "variants": [{ "name": "tall", "params": { "height": 200.0 }, "note": "the pantry" }],
-                  "variant": "tall" },
-                { "name": "broken", "error": "trace", "refused": false, "assembly": false, "uses": [], "variants": [], "variant": null },
-                { "name": "held", "error": "hole too small", "refused": true, "assembly": false, "uses": [], "variants": [], "variant": null },
-                { "name": "rig", "error": null, "refused": false, "assembly": true, "uses": ["alpha"], "variants": [], "variant": null }
+                  "variant": "tall", "target": { "file": "scans/original.stl", "units": "mm", "tolerance_mm": 0.1,
+                    "alignment": "stored", "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
+                  "reconstruction": "bounding_box_draft" },
+                { "name": "broken", "error": "trace", "refused": false, "assembly": false, "uses": [], "variants": [], "variant": null, "target": null, "reconstruction": null },
+                { "name": "held", "error": "hole too small", "refused": true, "assembly": false, "uses": [], "variants": [], "variant": null, "target": null, "reconstruction": null },
+                { "name": "rig", "error": null, "refused": false, "assembly": true, "uses": ["alpha"], "variants": [], "variant": null, "target": null, "reconstruction": null }
             ])
         );
         std::fs::remove_dir_all(root).unwrap();

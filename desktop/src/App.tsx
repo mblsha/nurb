@@ -21,6 +21,8 @@ import { IconCube, IconCubes, IconFolder, IconFolderPlus, IconGear, IconVariant 
 import { COLUMNS, fitColumns, initialColumns, resizedColumn } from "./layout";
 import { createLatestRequestGate } from "./latestRequest";
 import Logo from "./Logo";
+import ReferenceProjectDialog from "./ReferenceProjectDialog";
+import { reconstructionPrompt, type PartReference, type ReferenceProject } from "./referenceProject";
 import type { Column } from "./layout";
 import { partMessage, type PartConfigurationRequest } from "./partMessages";
 import { createPartRecovery } from "./partRecovery";
@@ -51,6 +53,10 @@ type Part = {
   // active mark tracks truth (an agent or a slider drag can move it) rather than
   // the last click.
   variant: string | null;
+  target: PartReference | null;
+  // Present on a newly created reference project until its analytic rebuild
+  // starts. The card carries this across app and server restarts.
+  reconstruction: "bounding_box_draft" | string | null;
 };
 type PartState = { path: string; parts: Part[] };
 type ChatInfo = {
@@ -128,7 +134,7 @@ function EngineStarting() {
       starting the CAD engine…
       {seconds >= 10 && (
         <div className="viewer-status-detail">
-          {seconds}s — a cold start can take a few minutes when the computer is busy
+          {seconds}s, a cold start can take a few minutes when the computer is busy
         </div>
       )}
     </div>
@@ -170,6 +176,9 @@ function App() {
   const [variantOrigin, setVariantOrigin] = useState<{ part: string; variant: string; drifted: boolean } | null>(null);
   const [naming, setNaming] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [referenceSource, setReferenceSource] = useState<string | null>(null);
+  const [referenceCreating, setReferenceCreating] = useState(false);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
   const [partNaming, setPartNaming] = useState(false);
   const [partCreating, setPartCreating] = useState(false);
   const [menu, setMenu] = useState<
@@ -197,6 +206,9 @@ function App() {
   // Composer text waiting for the project chat, from the viewer's "unify in chat"
   // nudge. Prefilled, never sent: the lift stays the user's call.
   const [projectSeed, setProjectSeed] = useState<string | null>(null);
+  // The reconstruction action prepares the selected part's own composer. It is
+  // intentionally not sent until the user presses send.
+  const [partSeed, setPartSeed] = useState<{ path: string; part: string; text: string } | null>(null);
   const [agentStatuses, setAgentStatuses] = useState<AgentStatus[]>([]);
   const [agentStatusState, setAgentStatusState] = useState<"loading" | "ready" | "error">("loading");
   const agentStatusRequests = useRef(createLatestRequestGate());
@@ -558,7 +570,7 @@ function App() {
         setPartState({
           path: active,
           parts: entries
-            .map(({ name, error, refused, assembly, uses, variants, variant }) => ({ name, error, refused, assembly, uses, variants, variant }))
+            .map(({ name, error, refused, assembly, uses, variants, variant, target, reconstruction }) => ({ name, error, refused, assembly, uses, variants, variant, target, reconstruction }))
             .sort((a, b) => a.name.localeCompare(b.name)),
         });
       } catch {
@@ -596,6 +608,7 @@ function App() {
     setPartNaming(false);
     setProjectChatFocused(false);
     setProjectSeed(null);
+    setPartSeed(null);
     if (!active) return;
     let stale = false;
     invoke<ChatInfo[]>("list_sessions", { path: active })
@@ -690,6 +703,33 @@ function App() {
     event.preventDefault();
     const name = new FormData(event.currentTarget).get("name")?.toString().trim();
     if (name) createNamed(name);
+  };
+
+  const newFromStl = async () => {
+    try {
+      const source = await pickFolder({ title: "Choose the original STL", directory: false, multiple: false, filters: [{ name: "STL mesh", extensions: ["stl"] }] });
+      if (typeof source !== "string") return;
+      setReferenceError(null);
+      setReferenceSource(source);
+    } catch (failure) {
+      setError(String(failure));
+    }
+  };
+
+  const createReferenceProject = async (project: ReferenceProject) => {
+    if (referenceCreating) return;
+    setReferenceCreating(true);
+    setReferenceError(null);
+    try {
+      const path = await invoke<string>("create_reference_project", { ...project, folder: projectsFolder });
+      setReferenceSource(null);
+      await refreshProjects();
+      openProject(path);
+    } catch (failure) {
+      setReferenceError(String(failure));
+    } finally {
+      setReferenceCreating(false);
+    }
   };
 
   // Debug-build automation only: the loopback test hook forwards a project
@@ -806,6 +846,16 @@ function App() {
     invoke("select_part", { path: active, part: name });
   };
 
+  const prepareReconstruction = (part: Part) => {
+    if (!active || !part.target || part.reconstruction !== "bounding_box_draft") return;
+    selectPart(part.name);
+    setPartSeed({
+      path: active,
+      part: part.name,
+      text: reconstructionPrompt(part.name, part.target),
+    });
+  };
+
   // Part files change on disk the moment create/delete returns, but the
   // server's watcher registers them asynchronously. Poll until the listing
   // settles (or give up and take what the server says) before committing, so
@@ -814,7 +864,7 @@ function App() {
     for (let attempt = 0; ; attempt++) {
       const entries = await invoke<Part[]>("list_parts", { path });
       const listed = entries
-        .map(({ name, error, refused, assembly, uses, variants, variant }) => ({ name, error, refused, assembly, uses, variants, variant }))
+        .map(({ name, error, refused, assembly, uses, variants, variant, target, reconstruction }) => ({ name, error, refused, assembly, uses, variants, variant, target, reconstruction }))
         .sort((a, b) => a.name.localeCompare(b.name));
       if (settled(listed) || attempt >= 19) {
         setPartState({ path, parts: listed });
@@ -1088,6 +1138,9 @@ function App() {
                       >
                         {part.assembly ? <IconCubes label={assemblyLabel(part)} /> : <IconCube />}
                         <span className="part-name">{part.name}</span>
+                        {part.reconstruction === "bounding_box_draft" && (
+                          <span className="tag" title="reference loaded; reconstruction has not started">draft</span>
+                        )}
                         {busyChats[chatKey(project.path, part.name)] ? (
                           <span className="part-busy" title="the agent is working on this part" />
                         ) : columns.some(
@@ -1117,6 +1170,26 @@ function App() {
                           </span>
                         )}
                       </li>
+                      {part.name === selectedPart && (
+                        <li className={`part-reference ${part.target?.error ? "problem" : ""}`}>
+                          <span>
+                            {part.target?.error
+                              ? "reference needs attention in the viewer"
+                              : part.reconstruction === "bounding_box_draft"
+                                ? part.target
+                                  ? "reference loaded · bounding-box draft"
+                                  : "bounding-box draft · add its reference"
+                                : part.target
+                                  ? "reference attached · compare in viewer"
+                                  : "add or compare a reference in the viewer"}
+                          </span>
+                          {part.target && part.reconstruction === "bounding_box_draft" && !part.target.error && (
+                            <button type="button" onClick={() => prepareReconstruction(part)}>
+                              Rebuild as editable CAD
+                            </button>
+                          )}
+                        </li>
+                      )}
                       {/* The card's variants nest under their part the way the
                           browser viewer draws them: the same part at other values,
                           wearing the sliders glyph. They unfold under the selection
@@ -1206,6 +1279,10 @@ function App() {
             </div>
           ))}
         </div>
+        <button className="rail-add" onClick={newFromStl}>
+          <IconCube />
+          new from STL…
+        </button>
         <button className="rail-add" onClick={addExisting}>
           <IconFolderPlus />
           add existing…
@@ -1301,6 +1378,16 @@ function App() {
           onClose={() => setShowSettings(false)}
         />
       )}
+      {referenceSource && (
+        <ReferenceProjectDialog
+          key={referenceSource}
+          source={referenceSource}
+          creating={referenceCreating}
+          error={referenceError}
+          onCreate={createReferenceProject}
+          onClose={() => setReferenceSource(null)}
+        />
+      )}
       {showGeminiKey ? (
         <GeminiKeyDialog
           onSubmit={(key) => finishGeminiKey(key)}
@@ -1352,8 +1439,20 @@ function App() {
               }))}
             resume={col.resume}
             hidden={!columnVisible(col)}
-            seed={isProject && col.path === active ? projectSeed : null}
-            onSeed={isProject ? () => setProjectSeed(null) : undefined}
+            seed={
+              isProject && col.path === active
+                ? projectSeed
+                : partSeed?.path === col.path && partSeed.part === col.part
+                  ? partSeed.text
+                  : null
+            }
+            onSeed={
+              isProject
+                ? () => setProjectSeed(null)
+                : () => setPartSeed((pending) =>
+                    pending?.path === col.path && pending.part === col.part ? null : pending,
+                  )
+            }
             onSession={(id) => chatStarted(col.path, col.part, id, agent)}
             onFresh={() => startFresh(col.path, col.part)}
             onAgent={(id, unstarted) => {
@@ -1396,6 +1495,9 @@ function App() {
                   {creating ? "creating…" : "create"}
                 </button>
               </form>
+              <button className="welcome-existing" onClick={newFromStl}>
+                new from STL…
+              </button>
               <button className="welcome-existing" onClick={addExisting}>
                 or add an existing folder…
               </button>

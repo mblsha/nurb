@@ -348,6 +348,36 @@ textarea {
   color: var(--dim);
 }
 
+.part-reference {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 1px 7px 5px 18px;
+  color: var(--dimmer);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.part-reference.problem {
+  color: var(--bad);
+}
+
+.part-reference button {
+  padding: 3px 6px;
+  border: 1px solid rgba(110, 231, 168, 0.35);
+  border-radius: 5px;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.part-reference button:hover {
+  background: rgba(110, 231, 168, 0.1);
+}
+
 /* A card variant: the same part flexed to other values, so it nests under its
    part the way the viewer's list draws it, indented past the icon column. */
 .part-var {
@@ -1690,6 +1720,45 @@ textarea {
 
 .api-key-input:focus {
   border-color: rgba(110, 231, 168, 0.55);
+}
+
+.about-card.reference-project-dialog {
+  width: min(440px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.reference-project-dialog .api-key-label {
+  margin-top: 16px;
+}
+
+.reference-file {
+  color: var(--text);
+  font: 12px var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.reference-size {
+  color: var(--text);
+  font: 14px var(--mono);
+  margin: 10px 0 4px;
+}
+
+.reference-project-dialog .reference-hint {
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+.reference-error {
+  color: var(--bad);
+  overflow-wrap: anywhere;
+}
+
+.reference-project-dialog button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .api-key-meta {
