@@ -158,6 +158,7 @@ assert.equal(sent.length,4);assert.equal(sent[3].token,'a2');assert.equal(sent[3
 def test_switching_parts_resets_the_pending_datum_preview():
     js([("function inspectionRestore(", "function componentAncestors("),
         ("function datumReset(", "function inspectionVector(")], """
+let inspectionToleranceOverride=.3;
 let inspectionFor='A',inspectionFrameBox={},hiddenComponents=new Set(),inspectionRegionName='old',inspectionRegionError='old',sectionDrawingKey='old';
 let datumPreview={name:'A',token:'a1',operation:{},transform:[1]};
 const comparePreview=new Map([['A',{transform:[1]}]]),q=new URLSearchParams(),view='top';
@@ -165,7 +166,7 @@ const fields={datumapply:{disabled:false},datumstatus:{textContent:'Preview read
 const document={getElementById:id=>fields[id]};
 inspectionRestore('B');
 assert.equal(datumPreview,null);assert.equal(fields.datumapply.disabled,true);assert.equal(fields.datumstatus.textContent,'');
-assert.equal(comparePreview.has('A'),false);assert.equal(inspectionFor,'B');
+assert.equal(comparePreview.has('A'),false);assert.equal(inspectionFor,'B');assert.equal(inspectionToleranceOverride,null);
 """)
 
 
@@ -300,4 +301,22 @@ verificationShow({name:'part',token:'new',target:{}});
 assert.equal(fields.verifyresult.cleared,true);
 assert.match(fields.verifystatus.textContent,/stale/);
 assert.equal(fields.verifycancel.disabled,true);
+""")
+
+
+def test_replaced_reference_is_in_part_frame_before_a_section_is_restored():
+    js([('function sectionUpdate()', '// ---- download ----')], """
+const mesh=new THREE.Group();mesh.position.z=4;
+const cad=new THREE.Mesh(new THREE.BoxGeometry(40,24,8));mesh.add(cad);mesh.updateMatrixWorld(true);
+const reference=new THREE.Group();reference.name='target';
+const ref=new THREE.Mesh(new THREE.BoxGeometry(40,24,8));reference.add(ref);mesh.add(reference);
+const cutting=true,writers=[],cap=new THREE.Object3D(),plane=new THREE.Plane(),PARKED=1e10;
+let cutSign=1,cutAxis='z',cutAt=.5,cutMm=null,sectionDrawingKey=null;
+const inspectionMode='section',camera={position:new THREE.Vector3(20,-20,30)},AXES={z:[0,0,1]};
+function modelNodes(){return [cad];}function referenceMeshes(){return [ref];}
+function componentInfo(){return {role:'part'};}function inspectionSave(){}
+sectionUpdate();
+assert.equal(plane.constant/cutSign-mesh.position.z,0);
+assert.equal(ref.matrixWorld.elements[14],4);
+cutMm=1.25;sectionUpdate();assert.equal(plane.constant/cutSign-mesh.position.z,1.25);
 """)

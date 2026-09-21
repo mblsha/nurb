@@ -219,6 +219,7 @@ def test_tolerance_input_rejects_zero_and_values_below_the_backend_minimum():
         "const document = {getElementById: () => input};\n"
         "const sock = {readyState: 1, send: text => sent.push(JSON.parse(text))};\n"
         "const comparePending = new Map([[current, {}]]);\n"
+        "let inspectionToleranceOverride = .3;\n"
         "let invalidated = 0; function compareInvalidate() { invalidated++; }\n"
         + change
         + """

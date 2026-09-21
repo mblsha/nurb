@@ -3024,6 +3024,8 @@ function sectionUpdate() {
   cap.visible = on;
   for (const w of writers) w.visible = on && writerSourceVisible(w.userData.source);
   if (!on) { plane.constant = PARKED; return; }
+  // A freshly attached reference must inherit the plated part transform before bounds are read.
+  mesh.updateMatrixWorld(true);
   // The group has no geometry of its own, and 'context' scenery must not stretch the
   // cut range: the slider spans the printed parts, in world space, joints included.
   const box = new THREE.Box3();
@@ -5015,9 +5017,10 @@ function captureViewState() {
   if (!mesh || !controls) throw new Error('Wait for a built model before saving an inspection.');
   const entry=parts.get(current), target=entry?.target;
   const region=inspectionRegionName || selectedFeatureRegion()?.name || null;
+  const sectionPosition=cutting && cutSign ? plane.constant/cutSign-(inspectionMode==='section' || cutAxis!=='z'?mesh.position[cutAxis]:0) : cutMm;
   return {camera:{position_mm:camera.position.clone().sub(mesh.position).toArray(),target_mm:controls.target.clone().sub(mesh.position).toArray(),up:camera.up.toArray(),zoom:camera.zoom,height_mm:camera.top-camera.bottom},
     viewport:[main.clientWidth,main.clientHeight],mode:inspectionMode,hidden_components:[...hiddenComponents].sort(),
-    section:{enabled:cutting,axis:cutAxis,position_mm:cutMm,fraction:cutAt,sign:cutSign || 1},
+    section:{enabled:cutting,axis:cutAxis,position_mm:sectionPosition,fraction:cutAt,sign:cutSign || 1},
     alignment:comparePreview.get(current)?.transform || target?.transform || [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],
     tolerance_mm:inspectionToleranceOverride ?? Number(document.getElementById('comparetolerance').value || target?.tolerance_mm || .1),region,
     station:Number(featureField('station').value || 0),deviation_scale_mm:compareScale,deviation_map:compareMap,
@@ -5148,7 +5151,7 @@ async function captureInspectionImage(item,sections=null,freshness={status:'curr
     const ctx=canvas.getContext('2d'); ctx.fillStyle='#16181d';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(source,0,0,canvas.width,canvas.height-48);
     if (item.view.mode==='section') ctx.drawImage(sectionCanvas,canvas.width/2,0,canvas.width/2,canvas.height-48);
     if (['section','side-by-side'].includes(item.view.mode)) {
-      ctx.fillStyle='#eee';ctx.font='14px sans-serif';ctx.fillText('CAD',14,24);ctx.fillText(item.view.mode==='section'?'Section difference':'Reference',canvas.width/2+14,24);
+      ctx.fillStyle='#eee';ctx.font='14px sans-serif';ctx.fillText(item.view.mode==='section'?'CAD + reference cut':'CAD',14,24);ctx.fillText(item.view.mode==='section'?'Section difference':'Reference',canvas.width/2+14,24);
     }
     ctx.fillStyle='#e5e7eb';ctx.font='13px sans-serif';ctx.fillText(`${item.name} | ${item.view.mode} | ${freshness.status} | ${item.view.tolerance_mm} mm`,12,canvas.height-20);
     return {png:canvas.toDataURL('image/png').split(',')[1],section_images:captureSectionImages(item,sections)};
