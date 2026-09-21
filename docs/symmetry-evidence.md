@@ -31,3 +31,9 @@ Reference fitting and kernel distances run in a disposable child process with a 
 The controls live in the comparison tool panel and remain visible under `?embed`; no sidebar/footer dependency is introduced. The desktop shell does not duplicate these numerical inspection results, so `desktop/src` needs no new rail fields or postMessages. The feature uses only vendored viewer resources and existing scientific dependencies, and works offline.
 
 The implementation reuses `feature_evidence.shape_identity` and `evidence_identity`. Its isolated `symmetry_service` owns background jobs; `server.py` adds only initialization and command dispatch. The viewer adds an independent panel and one comparison-refresh and websocket-response hook, so it can integrate alongside feature sections and precise mesh verification without changing their measurements or caches.
+
+## Before and after fitting
+
+Evidence includes a `plane.baseline` measured around the chosen coordinate axis through the reference bounding-box center before fitting, plus `plane.after_fit`. Both use exactly the same independent validation samples and distance query, with per-side counts and residual statistics. `plane.p95_improvement_mm` is the literal baseline p95 minus fitted p95; negative values are retained when fitting makes holdout error worse. The viewer displays both values and the signed change. This compares reflection-plane fits, not scan-to-CAD registration accuracy or a guarantee that applying the preview will improve CAD agreement.
+
+**Save evidence JSON** uses the shared desktop-safe artifact bridge. In the app, the server writes a uniquely named file under `build/evidence-exports/` and the existing `nurb:saved` shell message reveals it. Browser users receive a normal download. Saved inspection recipes under `inspections/` are excluded from source revision hashing, alongside generated build output.

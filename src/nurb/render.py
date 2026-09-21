@@ -23,8 +23,7 @@ from .builder import BuildError
 MISSING = """nurb render needs Playwright, which is not installed. It is optional
 because it pulls down a browser and nothing else in nurb needs one:
 
-  uv add playwright
-  uv run playwright install chromium"""
+  uv pip install "nurb[render]" && python -m playwright install chromium"""
 
 VIEWS = ("iso", "front", "back", "left", "right", "top")
 MODES = ("model", "reference", "overlay", "deviation", "side-by-side", "section")
@@ -132,6 +131,9 @@ def snapshots(root, shots, timeout=30000):
             for shot in shots:
                 path = pathlib.Path(shot["part"])
                 name = path.stem
+                setup = shot.get("setup")
+                if setup:
+                    server.draft = bool(setup["identity"].get("draft"))
                 overrides = shot.get("overrides") or None
                 # Rebuilt only when this shot wants different parameter values than the
                 # server is holding, so a run of shots of one part builds it once.
@@ -147,6 +149,15 @@ def snapshots(root, shots, timeout=30000):
                 mode = shot.get("mode") or "model"
                 if mode != "model" and not server.state[name].get("target"):
                     raise BuildError(f"{name}: {mode} capture needs a reference mesh on the part card")
+                if setup:
+                    from . import inspection
+                    entry = server.state[name]
+                    before = inspection.identity(server, path, entry, setup["view"])
+                    fresh = inspection.freshness(setup["identity"], before)
+                    if fresh["status"] == "stale" and not shot.get("allow_stale"):
+                        raise BuildError("saved inspection is stale: " + ", ".join(fresh["changed"]) + "; review it or use --allow-stale to label a new capture")
+                    local_sections = inspection.sections(server, entry, setup)
+                    display_metrics = inspection.comparison(server, entry, setup)
                 wants_check = shot.get("check") or shot.get("chrome") or mode == "deviation" or shot.get("region")
                 if wants_check and not built[name][1]:
                     # Only when asked for: checking costs about as much as building.
@@ -198,7 +209,17 @@ def snapshots(root, shots, timeout=30000):
                 # gives exactly the size asked for. With the chrome kept, the sidebar is
                 # part of what was asked for, so shoot the page.
                 target = page if shot.get("chrome") else page.locator("main")
-                target.screenshot(path=str(png))
+                if setup:
+                    captured = page.evaluate("async data => window.__nurb.captureInspection(data.setup, data.sections, data.freshness, data.metrics)",
+                                             {"setup": setup, "sections": local_sections, "freshness": fresh, "metrics": display_metrics})
+                    after = inspection.identity(server, path, entry, setup["view"])
+                    if before != after:
+                        raise BuildError("inspection inputs changed during capture; no image was written")
+                    png.write_bytes(inspection.png_bytes(captured["png"]))
+                    shot["_inspection_context"] = {"server": server, "entry": entry, "identity": after,
+                                                   "sections": local_sections, "images": captured["section_images"], "metrics": display_metrics}
+                else:
+                    target.screenshot(path=str(png))
                 written.append(png)
             browser.close()
     finally:

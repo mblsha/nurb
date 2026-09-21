@@ -199,6 +199,11 @@
   #cut button.on { color: var(--accent); background: rgba(110,231,168,.1); }
   #cut input { width: 110px; margin: 0 6px 0 4px; }
   #comparepanel { width: 390px; max-width: calc(100vw - 268px); max-height: calc(100vh - 150px); overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(29,32,39,.96); box-shadow: 0 4px 16px rgba(0,0,0,.25); font-size: 11px; }
+  #savedinspections label { display:block; margin:7px 0; }
+  #savedinspections input, #savedinspections select { width:100%; box-sizing:border-box; color:var(--text); background:var(--bg); border:1px solid var(--line); padding:4px; font:inherit; }
+  #savedinspections p, #inspectionstatus { margin:8px 0; line-height:1.45; color:var(--dim); overflow-wrap:anywhere; }
+  #savedinspections summary { cursor:pointer; padding:6px 0; }
+  #inspectiondownload a { color:var(--accent); }
   #symmetrypanel label { display:block; margin:7px 0; }
   #symmetrypanel input[type=number], #symmetrypanel select { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:3px 5px; }
   #symmetrypanel input[type=number] { width:85px; }
@@ -726,6 +731,15 @@
     <div id="print"></div>
     <section id="comparepanel" aria-label="Compare CAD with reference" hidden>
       <h2>Compare <button id="compareclose" aria-label="close comparison panel">close</button></h2>
+      <details id="savedinspections"><summary>Saved inspections and capture</summary>
+        <p>Keep a camera, configuration, component visibility, comparison mode and local sections together. Capture an image, report and evidence files in one bundle.</p>
+        <label>Saved setup <select id="inspectionchoice"><option value="">Current view</option></select></label>
+        <button id="inspectionrefresh">Refresh list</button> <button id="inspectionrestore" disabled>Restore setup</button>
+        <label>Inspection name <input id="inspectionlabel" maxlength="120" placeholder="Headset lip, narrow rim"></label>
+        <button id="inspectionsave">Save current setup</button> <button id="inspectioncapture">Capture evidence bundle</button>
+        <div id="inspectionstatus" role="status"></div><div id="inspectiondownload"></div>
+        <p>Restoring a setup changes the displayed parameters and preview alignment. It does not rewrite the model or card. Changed inputs are labeled stale; saving a new setup records a new baseline.</p>
+      </details>
       <details id="symmetrypanel"><summary>Symmetry evidence</summary>
         <p>Fit the reference plane, then check both sides of the finished CAD, including trimmed faces and hole edges. The reference coordinates and bytes stay unchanged.</p>
         <div id="symmetrysource"></div><button id="symmetrycloud">Choose point cloud…</button> <button id="symmetryattached">Use attached reference</button>
@@ -1316,6 +1330,7 @@ async function ghostAttach(name, entry) {
 // Display state never enters parameter payloads or the export request.
 const INSPECTION_MODES = ['model', 'reference', 'overlay', 'deviation', 'side-by-side', 'section'];
 let inspectionMode = INSPECTION_MODES.includes(q.get('mode')) ? q.get('mode') : 'model';
+let inspectionToleranceOverride = null, inspectionCaptureViewport = null;
 let inspectionFor = null, hiddenComponents = new Set(), sectionDrawingKey = null, inspectionFrameBox = null;
 const sectionCanvas = document.getElementById('sectiondifference');
 const sectionStatus = document.getElementById('sectionstatus');
@@ -1340,7 +1355,7 @@ function inspectionSave() {
 }
 function inspectionRestore(name) {
   if (inspectionFor === name) return;
-  inspectionFor = name;
+  inspectionFor = name; inspectionToleranceOverride = null;
   datumReset();
   inspectionRegionName = null; inspectionRegionError = null;
   inspectionFrameBox = null;
@@ -1457,7 +1472,7 @@ document.getElementById('componentsreset').onclick = () => {
 // Orthographic panes share one camera, orientation, target, zoom and framing bounds.
 function inspectionRender() {
   const split = ['side-by-side','section'].includes(inspectionMode) && !!mesh?.getObjectByName('target');
-  const width = main.clientWidth, height = main.clientHeight;
+  const [width,height] = inspectionCaptureViewport || [main.clientWidth,main.clientHeight];
   resizeOrthographicCamera(camera, split ? width / 2 : width, height);
   renderer.setScissorTest(false); renderer.setViewport(0, 0, width, height); renderer.clear();
   const visibility = modelNodes().map(node => [node, node.visible]);
@@ -1603,9 +1618,9 @@ function sectionDifference() {
   const reference = mesh.getObjectByName('target');
   if (!reference) { sectionStatus.textContent = 'Reference geometry is not ready. No filled difference.'; window.__nurb.section = null; return; }
   const axis = {x:0,y:1,z:2}[cutAxis], at = plane.constant / cutSign - mesh.position[cutAxis];
-  const tolerance = Math.max(0,Number(parts.get(current)?.target?.tolerance_mm) || 0);
+  const tolerance = Math.max(0,Number(inspectionToleranceOverride ?? parts.get(current)?.target?.tolerance_mm) || 0);
   const key = [current, mesh.userData.token, parts.get(current)?.target?.stamp, tolerance, cutAxis, at,
-    reference.matrix.elements.join(','), [...hiddenComponents].join(','), main.clientWidth, main.clientHeight, camera.zoom, controls.target.toArray().join(',')].join(':');
+    reference.matrix.elements.join(','), [...hiddenComponents].join(','), ...(inspectionCaptureViewport || [main.clientWidth,main.clientHeight]), camera.zoom, controls.target.toArray().join(',')].join(':');
   if (key === sectionDrawingKey) return;
   sectionDrawingKey = key;
   mesh.updateMatrixWorld(true);
@@ -1617,7 +1632,8 @@ function sectionDifference() {
     node => new THREE.Matrix4().multiplyMatrices(inverse, node.matrixWorld), axis, at);
   const sides = [cad.map(gather), [referenceContours]];
   const all = sides.flat(), segments = all.flatMap(result => result.segments);
-  const width = Math.max(1, Math.round(main.clientWidth / 2)), height = Math.max(1, main.clientHeight);
+  const [canvasWidth,canvasHeight]=inspectionCaptureViewport || [main.clientWidth,main.clientHeight];
+  const width = Math.max(1, Math.round(canvasWidth / 2)), height = Math.max(1,canvasHeight);
   sectionCanvas.width = width; sectionCanvas.height = height;
   const context = sectionCanvas.getContext('2d'); context.fillStyle = '#16181d'; context.fillRect(0,0,width,height);
   const prefix = `${cutAxis.toUpperCase()} = ${at.toFixed(3)} mm (part frame). `;
@@ -2308,6 +2324,7 @@ function comparisonTransformFields(transform) {
 }
 
 function comparePanel(entry) {
+  savedInspectionState(entry);
   symmetryPanel(entry);
   importPanel(entry);
   const target = entry?.target;
@@ -2355,7 +2372,7 @@ function comparePanel(entry) {
       : metrics?.transform_frame ? ' · target → part frame in mm' : '';
   document.getElementById('comparemeta').textContent = `${units} · ${dimensions} · ${alignment}${sampleText}${provenanceText}`;
   const input = document.getElementById('comparetolerance');
-  if (document.activeElement !== input && !dirty) input.value = tolerance;
+  if (document.activeElement !== input && !dirty) input.value = inspectionToleranceOverride ?? tolerance;
   input.disabled = !sock || sock.readyState !== WebSocket.OPEN || !Number.isFinite(target.tolerance_mm);
   const canAlign = !input.disabled && !dirty && Array.isArray(target.transform) && target.transform.length === 16;
   document.getElementById('compareoriginal').disabled = !canAlign;
@@ -2476,6 +2493,7 @@ document.getElementById('compareunits').onchange = event => {
   sock.send(JSON.stringify({ type: 'target_settings', name: current, units: event.target.value }));
 };
 document.getElementById('comparetolerance').onchange = event => {
+  inspectionToleranceOverride = null;
   const tolerance = Number(event.target.value);
   if (!Number.isFinite(tolerance) || tolerance < 0.001 || !event.target.value.trim()) {
     event.target.setCustomValidity('Enter a tolerance of at least 0.001 mm.');
@@ -4885,6 +4903,7 @@ function symmetryPanel(entry) {
     const p = report.plane, cad = report.cad, fixed = value => Number.isFinite(value) ? value.toFixed(4) : 'unknown';
     const text = (value, tag='p') => { const node = document.createElement(tag); node.textContent = value; result.append(node); };
     text(`Plane normal ${p.normal.map(n => n.toFixed(6)).join(', ')}; offset ${fixed(p.offset_mm)} mm.`);
+    if (p.baseline && p.after_fit) text(`Reference p95 before fit ${fixed(p.baseline.statistics.p95_mm)} mm; after fit ${fixed(p.after_fit.statistics.p95_mm)} mm; change ${fixed(p.p95_improvement_mm)} mm (positive means improvement).`);
     text(`Reference: ${p.reference_status.replaceAll('_',' ')}. CAD: ${cad.status.replaceAll('_',' ')}.`);
     const table = document.createElement('table');
     for (const row of [['Side','Reference p95 mm','CAD max mm'], ...['negative','positive'].map(side => [side,fixed(p.reference_sides[side].p95_mm),fixed(cad.sides[side].max_mm)])]) {
@@ -4951,12 +4970,248 @@ symmetryElement('symmetrypreview').onclick = () => {
   const matrix=comparisonMatrix(report.plane.to_axis_transform).multiply(comparisonMatrix(report.alignment));
   comparisonPreview(comparisonTransform(matrix),'Symmetry plane alignment preview. Apply to save, then verify again.');
 };
-symmetryElement('symmetrydownload').onclick = () => {
+symmetryElement('symmetrydownload').onclick = async () => {
   const report=symmetryReports.get(current) || parts.get(current)?.symmetry;
   if (!symmetryFresh(parts.get(current),report)) return;
-  const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));
-  const anchor=document.createElement('a'); anchor.href=url; anchor.download=`${current}-symmetry.json`; anchor.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+  try { await window.downloadArtifact({filename:`${current}-symmetry.json`,mime:'application/json',data:JSON.stringify(report,null,2)}); }
+  catch(error) { symmetryElement('symmetrystatus').textContent=error.message; }
 };
+
+// Desktop webviews do not support anchor downloads. Save locally, then use the shell's reveal bridge.
+window.downloadArtifact = async ({filename,mime,data,encoding='utf8',path=null,url=null}) => {
+  if (embed) {
+    const result=path ? {path} : await inspectionRequest('artifact_save',{filename,mime,data,encoding});
+    window.parent.postMessage({type:'nurb:saved',path:result.path},'*');
+    return result;
+  }
+  let href=url;
+  if (!href) {
+    const body=encoding==='base64'?Uint8Array.from(atob(data),char=>char.charCodeAt(0)):data;
+    href=URL.createObjectURL(new Blob([body],{type:mime}));
+  }
+  const anchor=document.createElement('a');anchor.href=href;anchor.download=filename;anchor.click();
+  if (!url) setTimeout(()=>URL.revokeObjectURL(href),1000);
+};
+
+// Named inspections live in the project, while each capture is an immutable bundle.
+const savedInspectionRows = new Map(), inspectionCalls = new Map();
+let restoringInspection = null, inspectionLoaded = null, inspectionBusy = false;
+const inspectionField = key => document.getElementById('inspection'+key);
+function inspectionRequest(type, fields={}) {
+  if (!sock || sock.readyState!==WebSocket.OPEN) return Promise.reject(new Error('Reconnect to save or capture an inspection.'));
+  const request_id=crypto.randomUUID();
+  return new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{inspectionCalls.delete(request_id);reject(new Error('Inspection request timed out; check the connection and try again.'));},60000);
+    inspectionCalls.set(request_id,{resolve,reject,timer});
+    sock.send(JSON.stringify({type,name:current,token:parts.get(current)?.token,request_id,...fields}));
+  });
+}
+function inspectionResult(message) {
+  const pending=inspectionCalls.get(message.request_id); if (!pending) return;
+  clearTimeout(pending.timer); inspectionCalls.delete(message.request_id);
+  if (message.error) pending.reject(new Error(message.error)); else pending.resolve(message);
+}
+function captureViewState() {
+  if (!mesh || !controls) throw new Error('Wait for a built model before saving an inspection.');
+  const entry=parts.get(current), target=entry?.target;
+  const region=inspectionRegionName || selectedFeatureRegion()?.name || null;
+  return {camera:{position_mm:camera.position.clone().sub(mesh.position).toArray(),target_mm:controls.target.clone().sub(mesh.position).toArray(),up:camera.up.toArray(),zoom:camera.zoom,height_mm:camera.top-camera.bottom},
+    viewport:[main.clientWidth,main.clientHeight],mode:inspectionMode,hidden_components:[...hiddenComponents].sort(),
+    section:{enabled:cutting,axis:cutAxis,position_mm:cutMm,fraction:cutAt,sign:cutSign || 1},
+    alignment:comparePreview.get(current)?.transform || target?.transform || [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],
+    tolerance_mm:inspectionToleranceOverride ?? Number(document.getElementById('comparetolerance').value || target?.tolerance_mm || .1),region,
+    station:Number(featureField('station').value || 0),deviation_scale_mm:compareScale,deviation_map:compareMap,
+    deviation_auto:compareAuto,deviation_through:compareThrough,pins:pinsWanted,symmetry_plane:!!symmetryPlane};
+}
+function savedInspectionState(entry) {
+  if (inspectionLoaded && (inspectionLoaded.name!==entry?.name || inspectionLoaded.token!==entry?.token)) {
+    inspectionField('status').textContent='The displayed model rebuilt. Refresh the list to check saved evidence; restore a setup or save this new view.';
+    inspectionLoaded=null;
+  }
+}
+async function savedInspectionList() {
+  const name=current, response=await inspectionRequest('inspection_list');
+  savedInspectionRows.set(name,response.setups);
+  if (name!==current) return;
+  const select=inspectionField('choice'), selected=select.value;
+  select.replaceChildren(new Option('Current view',''),...response.setups.map(item=>new Option(`${item.name} · ${item.freshness.status}`,item.id)));
+  if (response.setups.some(item=>item.id===selected)) select.value=selected;
+  inspectionField('restore').disabled=!select.value;
+}
+async function inspectionWaitForGeometry(expected=null,previousToken=null) {
+  const name=current, started=performance.now();
+  while (performance.now()-started<45000) {
+    if (current!==name) throw new Error('The selected part changed; capture it again.');
+    const entry=parts.get(name), actual=Object.fromEntries((entry?.params || []).map(p=>[p.name,p.value]));
+    const matches=!expected || Object.entries(expected).every(([key,value])=>actual[key]===value);
+    if (entry?.error) throw new Error(entry.error);
+    if (matches && (!previousToken || entry?.token!==previousToken) && window.__nurb.ready && mesh?.userData.token===entry?.token) return entry;
+    await new Promise(resolve=>requestAnimationFrame(resolve));
+  }
+  throw new Error('The model or reference did not become ready within 45 seconds. Check its build and try again.');
+}
+async function inspectionBuildVisibleConfiguration() {
+  const entry=parts.get(current), expected=Object.fromEntries((entry?.params || []).map(p=>[p.name,values.has(p.name)?values.get(p.name):p.value]));
+  if ((entry?.params || []).some(p=>expected[p.name]!==p.value)) {
+    inspectionField('status').textContent='Building the displayed configuration before recording its evidence…';
+    sock.send(JSON.stringify({type:'params',name:current,values:expected}));
+  }
+  return inspectionWaitForGeometry(expected);
+}
+async function applyInspectionView(item, freshness={status:'current'},sections=null) {
+  const entry=parts.get(current), state=item.view;
+  if (item.part!==current || !mesh || mesh.userData.token!==entry?.token) throw new Error('Wait for this inspection’s part to finish building.');
+  if (state.mode!=='model') {
+    await ghostAttach(current,entry);
+    if (!mesh.getObjectByName('target') || ghostGeo.get(current)?.stamp!==entry.target?.stamp) throw new Error('Reference geometry is not ready. No capture was produced.');
+  }
+  const reference=mesh.getObjectByName('target');
+  if (reference) { reference.matrixAutoUpdate=false; reference.matrix.set(...state.alignment); }
+  const differs=entry.target && (state.tolerance_mm!==entry.target.tolerance_mm || state.alignment.some((value,i)=>Math.abs(value-entry.target.transform[i])>1e-10));
+  if (differs) comparePreview.set(current,{transform:state.alignment,reason:'Saved inspection alignment and tolerance preview. Capture computes fresh comparison evidence.'});
+  else comparePreview.delete(current);
+  inspectionMode=state.mode; hiddenComponents=new Set(state.hidden_components); componentResolveHidden();
+  cutAxis=state.section.axis; cutMm=state.section.position_mm; cutAt=state.section.fraction; cutSign=state.section.sign; cutting=state.section.enabled;
+  compareScale=state.deviation_scale_mm; compareMap=state.deviation_map; compareAuto=state.deviation_auto; compareThrough=state.deviation_through;
+  pinsWanted=state.pins; syncPins();
+  inspectionToleranceOverride=state.tolerance_mm;
+  document.getElementById('comparetolerance').value=state.tolerance_mm;
+  inspectionRegionName=state.region; inspectionApply(); componentPanel();
+  const region=(entry.target?.regions || []).find(region=>region.name===state.region);
+  if (region) { document.getElementById('regionexisting').value=region.name; featureEditorLoad(region); }
+  if (sections?.cad?.length) {
+    featureInspection={name:current,token:entry.token,result:{...sections,preview_only:true}};
+    featureField('station').replaceChildren(...sections.cad.map((cut,i)=>new Option(`${cut.name}: ${cut.offset_mm} mm`,String(i))));
+    featureField('station').hidden=false; featureField('plot').removeAttribute('hidden');
+    featureField('station').value=String(Math.min(state.station,sections.cad.length-1)); featurePlot();
+    featureField('status').textContent='Saved setup local sections. Display mesh estimate; capture records current or stale inputs.';
+    featureField('review').disabled=true;
+  } else {
+    const stations=(item.region?.feature?.sections || []).flatMap(section=>section.offsets_mm.map(offset=>`${section.name}: ${offset} mm`));
+    featureField('station').replaceChildren(...stations.map((label,i)=>new Option(label,String(i))));
+    featureField('station').value=String(state.station);
+  }
+  const split=['side-by-side','section'].includes(inspectionMode), aspect=main.clientWidth/(split?2:1)/main.clientHeight;
+  camera.top=state.camera.height_mm/2; camera.bottom=-camera.top; camera.right=camera.top*aspect; camera.left=-camera.right;
+  camera.position.fromArray(state.camera.position_mm).add(mesh.position); camera.up.fromArray(state.camera.up); camera.zoom=state.camera.zoom;
+  controls.target.fromArray(state.camera.target_mm).add(mesh.position); camera.updateProjectionMatrix(); controls.update();
+  if (state.symmetry_plane && freshness.status==='current') symmetryDrawPlane(entry.symmetry?.status==='measured'?entry.symmetry:item.verification?.symmetry);
+  else symmetryClearPlane();
+  comparePanel(entry);
+  sectionDrawingKey=null; sectionDifference(); inspectionRender();
+  inspectionLoaded={name:current,token:entry.token,id:item.id};
+  return entry;
+}
+function captureSectionImages(item,sections) {
+  if (!sections?.cad?.length) return [];
+  const before=featureInspection, index=featureField('station').value, choices=[...featureField('station').options].map(option=>[option.text,option.value]);
+  const images=[];
+  try {
+    featureInspection={name:current,token:parts.get(current)?.token,result:sections};
+    featureField('station').replaceChildren(...sections.cad.map((cut,i)=>new Option(cut.name,String(i))));
+    sections.cad.forEach((cut,i)=>{
+      featureField('station').value=String(i); featurePlot();
+      const svg=featureField('plot').cloneNode(true); svg.removeAttribute('hidden'); svg.removeAttribute('style');
+      svg.setAttribute('xmlns','http://www.w3.org/2000/svg'); svg.setAttribute('width','720'); svg.setAttribute('height','480');
+      const background=document.createElementNS('http://www.w3.org/2000/svg','rect');
+      for(const [key,value] of Object.entries({x:0,y:0,width:360,height:240,fill:'#16181d'}))background.setAttribute(key,value);
+      svg.insertBefore(background,svg.firstChild);
+      const title=document.createElementNS('http://www.w3.org/2000/svg','text');
+      for(const [key,value] of Object.entries({x:12,y:14,fill:'#ddd','font-size':10}))title.setAttribute(key,value);
+      title.textContent=`${cut.name}: ${cut.offset_mm} mm`;svg.append(title);
+      images.push(new XMLSerializer().serializeToString(svg));
+    });
+  } finally {
+    featureInspection=before; featureField('station').replaceChildren(...choices.map(([name,value])=>new Option(name,value))); featureField('station').value=index;
+    if (before) featurePlot(); else featureField('plot').replaceChildren();
+  }
+  return images;
+}
+async function captureInspectionImage(item,sections=null,freshness={status:'current'},displayMetrics=null) {
+  await inspectionWaitForGeometry();
+  await applyInspectionView(item,freshness,sections);
+  const entry=parts.get(current), token=entry.token;
+  const enabled=controls.enabled; controls.enabled=false;
+  try {
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    if (parts.get(current)?.token!==token || mesh.userData.token!==token) throw new Error('The model changed during capture. Capture again.');
+    if (item.view.mode!=='model' && !mesh.getObjectByName('target')) throw new Error('Reference geometry is missing. Capture cancelled.');
+    if (item.view.mode==='deviation') {
+      if (!displayMetrics) throw new Error('Deviation samples are not ready. No capture was produced.');
+      comparePainted=null; compareSamples(entry,inspectionSelectedMetrics(displayMetrics,item.view.region),item.view.tolerance_mm); compareMarks.visible=true;
+    }
+    inspectionCaptureViewport=item.view.viewport;
+    renderer.setSize(...inspectionCaptureViewport,false);
+    inspectionRender(); sectionDrawingKey=null; sectionDifference();
+    const canvas=document.createElement('canvas'), source=renderer.domElement, scale=Math.min(1,4096/source.width,4096/source.height);
+    canvas.width=Math.round(source.width*scale); canvas.height=Math.round(source.height*scale)+48;
+    const ctx=canvas.getContext('2d'); ctx.fillStyle='#16181d';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(source,0,0,canvas.width,canvas.height-48);
+    if (item.view.mode==='section') ctx.drawImage(sectionCanvas,canvas.width/2,0,canvas.width/2,canvas.height-48);
+    if (['section','side-by-side'].includes(item.view.mode)) {
+      ctx.fillStyle='#eee';ctx.font='14px sans-serif';ctx.fillText('CAD',14,24);ctx.fillText(item.view.mode==='section'?'Section difference':'Reference',canvas.width/2+14,24);
+    }
+    ctx.fillStyle='#e5e7eb';ctx.font='13px sans-serif';ctx.fillText(`${item.name} | ${item.view.mode} | ${freshness.status} | ${item.view.tolerance_mm} mm`,12,canvas.height-20);
+    return {png:canvas.toDataURL('image/png').split(',')[1],section_images:captureSectionImages(item,sections)};
+  } finally { inspectionCaptureViewport=null;renderer.setSize(main.clientWidth,main.clientHeight,false);sectionDrawingKey=null;controls.enabled=enabled; }
+}
+window.__nurb.applyInspection=applyInspectionView;
+window.__nurb.captureInspection=captureInspectionImage;
+async function inspectionAction(action) {
+  if (inspectionBusy) return;
+  inspectionBusy=true;
+  for (const key of ['save','capture','restore','refresh']) inspectionField(key).disabled=true;
+  const name=current;
+  try {
+    if (action==='refresh') { await savedInspectionList(); inspectionField('status').textContent='Saved setups checked against the displayed build.'; return; }
+    if (action==='restore') {
+      origin=null;
+      const response=await inspectionRequest('inspection_restore',{id:inspectionField('choice').value});
+      restoringInspection=response.setup;
+      await inspectionWaitForGeometry(response.setup.configuration.parameters,response.previous_token);
+      // The restored configuration can have the same parameter values but a different draft state.
+      await savedInspectionList();
+      const row=savedInspectionRows.get(current)?.find(item=>item.id===response.setup.id);
+      const sections=await inspectionRequest('inspection_sections',{id:response.setup.id});
+      await applyInspectionView(response.setup,row?.freshness || {status:'unknown'},sections.sections);
+      restoringInspection=null;
+      inspectionField('label').value=response.setup.name;
+      inspectionField('status').textContent=`Restored ${response.setup.name}. Saved evidence is ${row?.freshness.status || 'unknown'}.`;
+      return;
+    }
+    if (featureDirty) throw new Error('Save the feature region edits before recording an inspection.');
+    await inspectionBuildVisibleConfiguration();
+    const view=captureViewState(), label=inspectionField('label').value.trim() || `${current} ${inspectionMode}`;
+    if (action==='save') {
+      const response=await inspectionRequest('inspection_save',{view,label});
+      await savedInspectionList();inspectionField('choice').value=response.setup.id;
+      inspectionLoaded={name:current,token:parts.get(current).token,id:response.setup.id};
+      inspectionField('status').textContent='Inspection setup saved in the project.';return;
+    }
+    inspectionField('status').textContent='Preparing current source identities and local section evidence…';
+    const selected=inspectionField('choice').value;
+    const baseline=savedInspectionRows.get(current)?.find(item=>item.id===selected);
+    if (baseline) view.viewport=baseline.view.viewport;
+    const response=await inspectionRequest('inspection_prepare',{view,label,id:selected || undefined});
+    if (current!==name) throw new Error('The selected part changed. Capture again.');
+    inspectionField('status').textContent='Waiting for aligned reference geometry and drawing the capture…';
+    const image=await captureInspectionImage(response.setup,response.sections,response.freshness,response.display_metrics);
+    const saved=await inspectionRequest('inspection_capture',{ticket:response.ticket,...image});
+    inspectionField('status').textContent=`Evidence bundle saved. Setup is ${saved.freshness.status}${saved.freshness.changed.length?': '+saved.freshness.changed.join(', '):''}.`;
+    const link=document.createElement('a');link.textContent=embed?'Show captured evidence':'Download evidence bundle';link.href=`/inspection-evidence/${saved.file}`;link.download=saved.file;
+    if (embed) link.onclick=event=>{event.preventDefault();window.downloadArtifact({filename:saved.file,path:saved.path});};
+    inspectionField('download').replaceChildren(link);
+    if (embed) await window.downloadArtifact({filename:saved.file,path:saved.path});
+    await savedInspectionList();inspectionField('choice').value=saved.setup_id;
+  } catch(error) { inspectionField('status').textContent=error.message; }
+  finally { inspectionBusy=false;for(const key of ['save','capture','refresh'])inspectionField(key).disabled=false;inspectionField('restore').disabled=!inspectionField('choice').value; }
+}
+for (const action of ['save','capture','restore','refresh']) inspectionField(action).onclick=()=>inspectionAction(action);
+inspectionField('choice').onchange=()=>{
+  inspectionField('restore').disabled=!inspectionField('choice').value;
+  const row=savedInspectionRows.get(current)?.find(item=>item.id===inspectionField('choice').value);
+  if(row) {inspectionField('label').value=row.name;inspectionField('status').textContent=`Saved evidence is ${row.freshness.status}${row.freshness.changed.length?': '+row.freshness.changed.join(', '):''}. Restore before capturing this setup.`;}
+};
+document.getElementById('savedinspections').ontoggle=()=>{if(document.getElementById('savedinspections').open && !inspectionBusy)inspectionAction('refresh');};
 
 // ---- socket ----
 
@@ -5118,6 +5373,7 @@ function connect() {
       sharedRuns = msg.runs || [];
       sharedPanel(current);
     }
+    if (msg.type === 'inspection_result') inspectionResult(msg);
     if (msg.type === 'target_symmetry') symmetryLanded(msg);
     if (msg.type === 'target_inspection') referenceInspectionLanded(msg);
     if (msg.type === 'target_components') importLanded(msg);

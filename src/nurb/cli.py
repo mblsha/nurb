@@ -940,6 +940,11 @@ def _inspection_region(value):
         raise ValueError(f"region {value!r}: use NAME=x0,y0,z0:x1,y1,z1 or NAME=@component ({exc})") from exc
 
 
+def cmd_inspection(args):
+    from .inspection import command
+    command(args)
+
+
 def cmd_symmetry(args):
     from .symmetry import command
     command(args)
@@ -1853,6 +1858,18 @@ def main(argv=None):
     s.add_argument("--save-regions", action="store_true", help="persist the named inspection regions in the reference card")
     s.add_argument("--datum", metavar="JSON", help='preview plane, axis, or landmarks alignment in the current part frame; combine with --save-alignment to persist')
     s.set_defaults(fn=cmd_compare)
+
+    s = sub.add_parser("inspection", help="list, render, or export saved inspection setups")
+    s.add_argument("part", nargs="?")
+    action = s.add_mutually_exclusive_group()
+    action.add_argument("--list", action="store_true", help="list saved setup IDs and freshness (default)")
+    action.add_argument("--render", metavar="ID", help="render this saved view and its evidence bundle")
+    action.add_argument("--export", metavar="ID", help="export a saved view as an evidence ZIP")
+    s.add_argument("--output", help="PNG destination for --render, ZIP destination for --export")
+    s.add_argument("--allow-stale", action="store_true", help="render current inputs with the saved view and label changed inputs stale")
+    s.add_argument("--timeout", type=int, default=45)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_inspection)
 
     s = sub.add_parser("symmetry", help="fit reference symmetry and check the finished trimmed CAD")
     s.add_argument("part", nargs="?")

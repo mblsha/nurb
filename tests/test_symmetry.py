@@ -236,3 +236,21 @@ def test_cli_unknown_is_machine_readable_and_unsuccessful(tmp_path, monkeypatch,
     assert result['status'] == 'unknown'
     assert 'exceeded' in result['error']
     assert 'cad' not in result
+
+
+def test_before_after_residuals_use_identical_samples_and_keep_regressions(monkeypatch):
+    import scipy.optimize
+    from types import SimpleNamespace
+    mesh=reference_mesh()
+    rotated=mesh.copy(); rotated.apply_transform(trimesh.transformations.rotation_matrix(np.deg2rad(6),[0,0,1]))
+    fitted=symmetry.fit_plane(rotated,symmetry.Options())
+    before=fitted['baseline']['statistics'];after=fitted['after_fit']['statistics']
+    assert before['count']==after['count']==5000
+    assert before['p95_mm']>0.3 and after['p95_mm']<0.01
+    assert fitted['p95_improvement_mm']==pytest.approx(before['p95_mm']-after['p95_mm'])
+    monkeypatch.setattr(scipy.optimize,'least_squares',lambda *a,**k:SimpleNamespace(x=np.array([.05,0,.2]),success=True,active_mask=np.zeros(3),nfev=1))
+    worse=symmetry.fit_plane(mesh,symmetry.Options())
+    assert worse['baseline']['statistics']['p95_mm']<1e-10
+    assert worse['after_fit']['statistics']['p95_mm']>0.3
+    assert worse['p95_improvement_mm']<0
+    assert all(worse['baseline']['reference_sides'][s]['count']>0 for s in ('negative','positive'))

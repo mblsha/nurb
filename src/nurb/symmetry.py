@@ -174,9 +174,16 @@ def fit_plane(reference, options):
     solved = least_squares(residual, np.zeros(3), bounds=([-slope, -slope, -span / 4], [slope, slope, span / 4]),
                            loss="soft_l1", f_scale=max(options.reference_tolerance_mm / 2, 0.01), max_nfev=80,
                            diff_step=1e-4, ftol=1e-9, xtol=1e-9, gtol=1e-9)
+    surface = compare._surface(reference) if is_mesh else None
+    baseline_normal, baseline_offset = unpack(np.zeros(3))
+    baseline_mirrored = reflect(validation, baseline_normal, baseline_offset)
+    baseline_distances = compare._to_surface(baseline_mirrored, surface) if is_mesh else tree.query(baseline_mirrored)[0]
+    baseline_sides = per_side(validation, baseline_distances, baseline_normal, baseline_offset, options.reference_tolerance_mm)
     normal, offset = unpack(solved.x)
     mirrored = reflect(validation, normal, offset)
-    distances = compare._to_surface(mirrored, compare._surface(reference)) if is_mesh else tree.query(mirrored)[0]
+    distances = compare._to_surface(mirrored, surface) if is_mesh else tree.query(mirrored)[0]
+    baseline_stats = statistics(baseline_distances, options.reference_tolerance_mm)
+    fitted_stats = statistics(distances, options.reference_tolerance_mm)
     sides = per_side(validation, distances, normal, offset, options.reference_tolerance_mm)
     if min(sides[side]["count"] for side in ("negative", "positive")) < 16:
         raise ValueError("the fitted plane lacks evidence on both sides; expand the selected region")
@@ -194,6 +201,11 @@ def fit_plane(reference, options):
     return {"normal": normal.tolist(), "offset_mm": offset, "equation": "normal dot point = offset_mm",
             "frame": "part_mm", "approximate_axis": options.axis, "to_axis_transform": alignment.reshape(-1).tolist(),
             "fit_evaluations": solved.nfev, "reference_sides": sides,
+            "baseline": {"normal": baseline_normal.tolist(), "offset_mm": baseline_offset, "reference_sides": baseline_sides,
+                         "statistics": baseline_stats, "definition": "chosen axis through reference bounding-box center, before fitting"},
+            "after_fit": {"statistics": fitted_stats, "reference_sides": sides},
+            "p95_improvement_mm": baseline_stats["p95_mm"] - fitted_stats["p95_mm"],
+            "comparison_method": "same independent validation samples and same distance query before and after; negative improvement is retained",
             "reference_tolerance_mm": options.reference_tolerance_mm,
             "reference_status": "within_sampled_threshold" if solved.success and not np.any(solved.active_mask) and all(sides[s]["p95_mm"] <= options.reference_tolerance_mm for s in ("negative", "positive")) else "review",
             "reference_method": "reflected holdout samples to triangle surface" if is_mesh else "reflected cloud points to cloud points",
@@ -316,7 +328,7 @@ def source_revision(part):
     sources = []
     for path in root.rglob("*"):
         relative = path.relative_to(root)
-        if any(piece.startswith(".") or piece in ("build", "__pycache__") for piece in relative.parts):
+        if any(piece.startswith(".") or piece in ("build", "inspections", "__pycache__") for piece in relative.parts):
             continue
         if path.is_file() and path.suffix.lower() in (".py", ".md", ".toml", ".json", ".step", ".stp", ".brep"):
             if path.suffix.lower() == ".json":
@@ -388,6 +400,8 @@ def command(args):
             print(f"  symmetry: {result['status']}")
             if "plane" in result:
                 print(f"  reference plane: normal {result['plane']['normal']}, offset {result['plane']['offset_mm']:.6g} mm")
+                plane=result["plane"]
+                print(f"  reference p95 before fit {plane['baseline']['statistics']['p95_mm']:.6g} mm; after fit {plane['after_fit']['statistics']['p95_mm']:.6g} mm; improvement {plane['p95_improvement_mm']:.6g} mm")
                 print(f"  finished CAD: {result['cad']['status']}; sampled tolerance {options.cad_tolerance_mm:g} mm")
                 for side in ("negative", "positive"):
                     measured = result["cad"]["sides"][side]

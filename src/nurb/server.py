@@ -13,6 +13,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import secrets
 import threading
 import traceback
@@ -1070,6 +1071,18 @@ class Server:
             if not token or not secrets.compare_digest(token, self.http_token):
                 return self._resp(403, b"forbidden", "text/plain")
             return await self.slice(path[len("/api/slice/") :])
+        if path.startswith("/inspection-evidence/"):
+            from .inspection import directory
+            filename = path[len("/inspection-evidence/"):]
+            if not re.fullmatch(r"[a-f0-9]{32}-[a-f0-9]{32}\.zip", filename):
+                return self._resp(404, b"unknown capture", "text/plain")
+            try:
+                file = directory(self.root, "build", "inspection-evidence") / filename
+                if file.is_symlink():
+                    raise ValueError("unsafe capture path")
+                return self._resp(200, file.read_bytes(), "application/zip", attach=filename)
+            except (OSError, ValueError):
+                return self._resp(404, b"capture unavailable", "text/plain")
         if path == "/api/sync":
             body = json.dumps(self._sync()).encode()
             return self._resp(200, body, "application/json")
@@ -1713,6 +1726,11 @@ class Server:
                 if target and name not in self.verifications:
                     target["verification"] = response
                 await self.reply(client, response)
+            return
+
+        if msg.get("type") in ("artifact_save", "inspection_sections", "inspection_list", "inspection_save", "inspection_restore", "inspection_prepare", "inspection_capture"):
+            from .inspection_service import handle
+            await handle(self, path, msg, client)
             return
 
         if msg.get("type") in ("target_symmetry", "target_symmetry_cancel"):

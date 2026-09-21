@@ -146,7 +146,7 @@ async def invalidate(server, paths):
                 current = await asyncio.to_thread(symmetry.reference_identity, source, report["reference_units"])
                 inputs_changed = current != report["identity"]["reference"]
             relevant = any(path.is_relative_to(server.root) and path.suffix.lower() in (".py", ".md", ".toml", ".json", ".step", ".stp", ".brep")
-                           and not any(piece.startswith(".") or piece in ("build", "__pycache__") for piece in path.relative_to(server.root).parts) for path in paths)
+                           and not any(piece.startswith(".") or piece in ("build", "inspections", "__pycache__") for piece in path.relative_to(server.root).parts) for path in paths)
             if relevant:
                 revision = await asyncio.to_thread(symmetry.source_revision, server.root / "parts" / f"{name}.py")
                 inputs_changed |= revision != report["source_revision"]

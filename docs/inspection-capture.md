@@ -1,0 +1,38 @@
+# Saved inspections and evidence capture
+
+Open **Compare > Saved inspections and capture** in the viewer or desktop app. Arrange the part, choose a comparison mode, select a named region and local section station, then give the setup a name. **Save current setup** stores an immutable baseline in the project's `inspections/` directory. **Capture evidence bundle** saves the view and its evidence together; with **Current view** selected it first creates a baseline automatically. Capture uses the existing renderer and local-section plotter, works offline, and does not require Playwright in the app.
+
+A setup records the camera in part coordinates, framing dimensions, mode, hidden component IDs (including isolation), global section, local feature plane and stations, selected station, reference alignment, tolerance, deviation display settings, parameters and configuration, draft state, model B-rep digest, source revision, reference content and units, semantic region and available verification results. The original source geometry and reference are never modified by saving or capturing. A fast assembly pose is rebuilt at its displayed parameter values before a baseline is saved, so the geometry identity describes what is shown.
+
+**Restore setup** rebuilds the saved runtime parameter configuration and draft state, then restores the camera, display controls, selected region and local sections. Alignment and tolerance are a preview until explicitly applied through the normal comparison controls. The captured raster uses the saved viewport dimensions, independent of the current window size. Changed camera, visibility, mode or other view settings require **Save current setup** to record a new baseline before capturing it as that setup. To capture a changed view immediately, select **Current view**.
+
+The list labels each baseline `current`, `stale` or `unknown` against the displayed build. After a rebuild, refresh the list to see changed fields. Restoring the original configuration can make a parameter-only difference current again. Geometry, reference bytes, alignment, tolerance, semantic contract, configuration and source revision are checked independently. Project source identity excludes generated `build/` files and the saved `inspections/` directory so a saved view does not invalidate itself. This conservative identity can expire evidence after unrelated project source edits. A stale setup remains useful as a camera and section recipe, but its historical verification is not a current pass.
+
+## Bundle contents
+
+Each capture is a new ZIP under `build/inspection-evidence/`; labels never become filesystem paths. The bundle contains `view.png`, `report.md`, `setup.json`, `evidence.json`, one SVG for each local section station, and the current display `model.glb` and `reference.glb` when available. The machine-readable evidence records both baseline and current identities, changed inputs, reference scale and alignment, full configuration, current verification availability, local section contours and display comparison provenance. Local sections retain the saved plane definitions even when the feature contract changes; that difference is explicitly stale. Saved setup sections are preview evidence, not a recorded semantic feature acceptance.
+
+The report includes sampled bidirectional distances and links to the image and section drawings. Precision verification, symmetry evidence and printability remain separate results. A verification that does not match the captured geometry, alignment or tolerance is `unknown`. These are sampled findings, not a physical-fit certificate. Display GLBs are included for inspection; the original project, source files and full-resolution reference are still needed to rebuild CAD or rerun precise verification. External source paths are represented by basename and content identity, never copied as local machine paths into the setup.
+
+Capture first prepares identities, cached comparison meshes and local sections, then waits for the model and required reference geometry/textures to finish loading. It renders the selected comparison mode through the same viewer, including regional deviation samples and section difference. Before writing the ZIP, the server checks identities and build token again. A source edit, reference replacement or rebuild during capture fails with an actionable retry message and produces no bundle. Captures have bounded image dimensions, payload size and ticket lifetime; preparing local sections still shares the live build lock and can briefly delay a rebuild on complex geometry. The capture contains the model canvas and section imagery, without editor panels; relevant settings and status live in the report and JSON.
+
+## CLI
+
+```sh
+nurb inspection part_name --list --json
+nurb inspection part_name --render SAVED_ID
+nurb inspection part_name --export SAVED_ID --output build/review.zip
+nurb inspection part_name --render SAVED_ID --allow-stale --json
+```
+
+Listing builds saved configurations and reports whether each baseline still matches. Render/export uses the shared viewer and the setup's saved camera, viewport, mode, alignment, visibility and sections; it writes a PNG plus evidence ZIP. Changed inputs are rejected by default. `--allow-stale` permits a new capture while retaining the stale label and changed fields. `--timeout` controls viewer readiness, in seconds.
+
+Only headless CLI rendering needs the optional render extra and Chromium. Install them into the environment that runs nurb with `uv pip install 'nurb[render]' && python -m playwright install chromium`. Missing prerequisites return a concise error with that remedy. The in-app capture button works without this extra.
+
+## Desktop bridge and protocol
+
+The controls are in the shared comparison panel, visible under `?embed`. The desktop rail does not mirror inspections, so no new `list_parts` field is needed. The shell already accepts `nurb:saved` and reveals a file in Finder; inspection ZIPs and symmetry/local-section exports reuse it. No desktop React changes are required. Browser captures use a normal download link; embedded captures write to the project and show **Show captured evidence**.
+
+The shared asynchronous helper is `window.downloadArtifact({filename,mime,data,encoding})`, accepting UTF-8 text by default or base64 with `encoding:'base64'`. It resolves only after the desktop server saves the artifact, returning its path; in a browser it starts a Blob download and returns no save confirmation. Supported types are JSON, inert SVG, PNG and ZIP. Desktop files have safe unique names under `build/evidence-exports/`. Existing server-generated ZIPs can pass `{filename,path,url}` to reuse the reveal/download bridge without uploading their contents again.
+
+Websocket commands `inspection_list`, `inspection_save`, `inspection_restore`, `inspection_sections`, `inspection_prepare` and `inspection_capture` return `inspection_result` with a matching `request_id`. Save, sections, prepare and capture require the current geometry `token`; prepare returns a short-lived one-use ticket, baseline, current freshness, sections and display metrics. Capture sends that ticket with PNG data and inert section SVGs. `artifact_save` uses the same response envelope for desktop file exports. Storage refuses traversal and external directory symlinks, attachments use fixed ZIP paths, and SVGs cannot contain active content or external resources.

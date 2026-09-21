@@ -404,21 +404,23 @@ def _inspect_region(
         definitions = region["feature"].get("sections", [])
         result["local_sections"] = {"cad": feature_evidence.sections(local_part, definitions),
                                    "reference": feature_evidence.sections(local_target, definitions)}
-    worst, samples, missing, detected = [], {}, [], False
+    worst, samples, spatial, missing, detected = [], {}, {}, [], False
     for key, local, other, direction in (("part", local_part, target_surface, "part_to_target"), ("target", local_target, part_surface, "target_to_part")):
         if not len(local.faces) or local.area <= 1e-12:
             result[key], samples[key] = None, 0
             missing.append(key)
             continue
-        points, _, count = _sample(local)
+        points, faces, count = _sample(local)
         distances = _to_surface(points, other)
         detected |= bool(np.any(distances > tolerance))
         result[key] = _stats(distances[:count], distances, tolerance)
         samples[key] = len(points)
+        spatial[key] = _spatial(points, distances, faces)
         worst.extend(_regions(points, distances, tolerance, direction))
     result.update({
         "status": "empty" if len(missing) == 2 else "partial" if missing else "measured",
         "sample_count": samples,
+        "samples": spatial,
         "tolerance_mm": tolerance,
         "detected_above_tolerance": detected if len(missing) < 2 else None,
         "worst_regions": sorted(worst, key=lambda r: r["peak_deviation_mm"], reverse=True)[:MAX_REGIONS],
