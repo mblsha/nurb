@@ -375,3 +375,21 @@ featureEditorState({token:'same-build',target:{feature_evidence:[{id:'rim',statu
 assert.equal(featureInspection,null);assert.equal(fields.review.disabled,true);
 assert.equal(fields.plot.hidden,true);assert.match(fields.status.textContent,/expired/);
 """)
+
+
+def test_editing_feature_scale_immediately_replaces_the_current_review_label():
+    start = "document.getElementById('regioneditor').addEventListener('input'"
+    handler = start + VIEWER.split(start, 1)[1].split("featureField('inspect').onclick", 1)[0]
+    js([("function featureEditorState(", "function featureInspect("),
+        ("function featureExportState(", "function featureExport(")], """
+const current='part',entry={token:'build',target:{feature_evidence:[{id:'rim',status:'current'}]}},parts=new Map([[current,entry]]);
+const fields={freshness:{},inspect:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{},json:{},svg:{}};
+const featureField=id=>fields[id],selectedFeatureRegion=()=>({feature:{id:'rim',feature_size_mm:.3}});
+let featureDirty=false,featureInspection={name:'part',token:'build',result:{id:'rim',identity:{token:'known'},cad:[{}]}},listener;
+const document={getElementById:()=>({addEventListener:(event,callback)=>{listener=callback;}})};
+featureEditorState(entry);assert.match(fields.freshness.textContent,/matches/);
+""" + handler + """
+listener({target:{id:'featuresize'}});
+assert.match(fields.freshness.textContent,/Unsaved feature edits/);
+assert.equal(featureInspection,null);assert.equal(fields.json.disabled,true);assert.equal(fields.svg.disabled,true);
+""")

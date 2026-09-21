@@ -2023,7 +2023,7 @@ document.getElementById('regioneditor').addEventListener('input', event => {
   if (['regionexisting','featurestation','featurereviewnote'].includes(event.target.id)) return;
   featureDirty = true; featureInspection = null; featureField('review').disabled = true;
   featureField('inspect').disabled = true; featureField('plot').setAttribute('hidden',''); featureField('station').hidden = true;
-  featureExportState();
+  featureEditorState(parts.get(current));
   featureField('status').textContent='Save the edited region before inspecting or recording its evidence.';
 });
 featureField('inspect').onclick = () => featureInspect();
