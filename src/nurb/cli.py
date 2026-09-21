@@ -958,6 +958,7 @@ def cmd_compare(args):
     """
     from . import builder, checks, compare
     from .meshing import MeshingError, VerificationPolicy
+    from . import feature_evidence
 
     root = project_root()
     named = args.part is not None
@@ -1038,7 +1039,12 @@ def cmd_compare(args):
                 continue
             sys.exit(f"  {reason}")
         try:
+            if not _reference_path(root, file).is_file():
+                raise ValueError(f"no file: {file}")
+            reference_bytes = _reference_path(root, file).read_bytes()
             mesh, unit, source = compare.load(root, file, units=units)
+            if _reference_path(root, file).read_bytes() != reference_bytes:
+                raise ValueError("reference changed while loading; compare again")
         except ValueError as exc:
             if args.json:
                 skipped.append({"part": path.stem, "reason": str(exc)})
@@ -1094,7 +1100,7 @@ def cmd_compare(args):
                         mesh_policy=VerificationPolicy.for_tolerance(
                             tolerance_mm,
                             accuracy_mm=getattr(args, "mesh_accuracy", None),
-                            feature_size_mm=getattr(args, "feature_size", None),
+                            feature_size_mm=feature_evidence.smallest_feature_size(regions, getattr(args, "feature_size", None)),
                             timeout_s=getattr(args, "mesh_timeout", 30.0),
                             max_triangles=getattr(args, "mesh_triangles", 1_000_000),
                         ),
@@ -1103,16 +1109,21 @@ def cmd_compare(args):
                     import hashlib
                     from . import feature_evidence
                     geometry_id = feature_evidence.shape_identity(shape)
-                    reference_id = hashlib.sha256(_reference_path(root, file).read_bytes() + unit.encode()).hexdigest()
+                    if _reference_path(root, file).read_bytes() != reference_bytes:
+                        raise ValueError("reference changed during section measurement; compare again")
+                    reference_id = hashlib.sha256(reference_bytes + unit.encode()).hexdigest()
                     def feature_result(region):
                         regional = next(item for item in metrics["inspection_regions"] if item["name"] == region["name"])
                         sections = regional.get("local_sections", {})
                         return {**feature_evidence.region_evidence(geometry_id, reference_id, metrics["transform"],
                                                                    name if overrides else None, region),
-                                "frame": "part_mm", "method": "comparison mesh contours inside the region, without artificial caps",
+                                "frame": "part_mm", "method": "bounded absolute verification mesh contours; not exact B-rep curves; no artificial caps",
                                 "cad": sections.get("cad", []), "reference": sections.get("reference", []),
                                 "section_status": regional["status"], "provenance": metrics["provenance"]}
                     metrics["feature_evidence"] = [feature_result(region) for region in regions if "feature" in region]
+                if getattr(args, "sections_output", None):
+                    metrics["section_exports"] = feature_evidence.write_section_exports(
+                        args.sections_output, name, metrics.get("feature_evidence", []))
                 metrics["alignment"] = applied_alignment
             except (ValueError, builder.BuildError) as exc:
                 if args.json:
@@ -1184,11 +1195,18 @@ def cmd_compare(args):
                 "worst_regions": metrics["worst_regions"],
                 "inspection_regions": metrics.get("inspection_regions", []),
                 "feature_evidence": metrics.get("feature_evidence", []),
+                "section_exports": metrics.get("section_exports", []),
             }
             output.append(result)
             if not args.json:
                 for line in compare.report(name, file, metrics, unit, source):
                     print(line)
+                for feature in metrics.get("feature_evidence", []):
+                    size = feature["feature"].get("feature_size_mm")
+                    scale = f"{size:g} mm" if size is not None else "unspecified"
+                    print(f"      feature {feature['id']}: smallest size {scale}; evidence {feature['status']}")
+                for exported in metrics.get("section_exports", []):
+                    print(f"      section evidence: {exported}")
                 if just_saved:
                     print(f"      stored this transform in {path.with_suffix('.md').name}")
     if args.json:
@@ -1855,6 +1873,7 @@ def main(argv=None):
     s.add_argument("--json", action="store_true", help="write complete structured comparison evidence")
     s.add_argument("--region", action="append", metavar="NAME=BOX", help="inspect NAME=x0,y0,z0:x1,y1,z1 in part mm, or NAME=@component; repeat to name regions")
     s.add_argument("--regions-file", metavar="JSON_FILE", help="read named regions with semantic feature evidence and saved local section series")
+    s.add_argument("--sections-output", metavar="DIRECTORY", help="export saved local section evidence as JSON and station SVGs using bounded verification meshes")
     s.add_argument("--save-regions", action="store_true", help="persist the named inspection regions in the reference card")
     s.add_argument("--datum", metavar="JSON", help='preview plane, axis, or landmarks alignment in the current part frame; combine with --save-alignment to persist')
     s.set_defaults(fn=cmd_compare)

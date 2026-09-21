@@ -249,6 +249,7 @@ fields.regionexisting.value='B';fields.regionname.value='edited';regionSave();as
 
 def test_feature_sections_expire_on_rebuild_even_before_new_metrics_arrive():
     js([("function featureEditorState(", "function featureInspect(")], """
+function featureExportState() {}
 const fields={freshness:{},inspect:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{}};
 const featureField=id=>fields[id], current='part';
 const selectedFeatureRegion=()=>({feature:{id:'rim'}});
@@ -264,15 +265,16 @@ assert.match(fields.status.textContent,/expired/);
 
 def test_feature_rename_preserves_identity_and_other_saved_series():
     js([("function featureRegionValues(", "function featureEditorLoad(")], """
-const previous={id:'stable-rim',sections:[{name:'first'},{name:'second'}],review:{identity:{token:'old'}}};
+const previous={id:'stable-rim',feature_size_mm:.3,sections:[{name:'first'},{name:'second'}],review:{identity:{token:'old'}}};
 const selectedFeatureRegion=()=>({feature:previous});
-const fields={enabled:{checked:true},point:{value:''},uncertainty:{value:''},sectionenabled:{checked:true},
+const fields={enabled:{checked:true},point:{value:''},size:{value:'0.3'},uncertainty:{value:''},sectionenabled:{checked:true},
  offsets:{value:'-1 0 1'},sectionname:{value:'Updated station'},origin:{value:'0 0 0'},normal:{value:'0 0 1'},
  x:{value:'1 0 0'},tolerance:{value:'0'},expected:{value:'small T'}};
 for (const key of ['role','configuration','orientation','notes','required','excluded','links']) fields[key]={value:''};
 const featureField=id=>fields[id], inspectionVector=text=>text.split(' ').map(Number);
 const result=featureRegionValues({name:'Corrected headset rim',component:'body'});
 assert.equal(result.feature.id,'stable-rim');
+assert.equal(result.feature.feature_size_mm,.3);
 assert.equal(result.feature.sections[1].name,'second');
 assert.deepEqual(result.feature.sections[0].offsets_mm,[-1,0,1]);
 assert.equal(result.feature.review.identity.token,'old');
@@ -319,4 +321,57 @@ sectionUpdate();
 assert.equal(plane.constant/cutSign-mesh.position.z,0);
 assert.equal(ref.matrixWorld.elements[14],4);
 cutMm=1.25;sectionUpdate();assert.equal(plane.constant/cutSign-mesh.position.z,1.25);
+""")
+
+
+def test_feature_scale_survives_editor_load_save_and_can_be_cleared_explicitly():
+    js([("function featureRegionValues(", "function featureEditorState(")], """
+const previous={id:'stable-rim',feature_size_mm:.3,role:'small headset lip'};
+const selectedFeatureRegion=()=>({feature:previous}), current='part', parts=new Map();
+const fields=new Map(), featureField=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,setAttribute(){}});return fields.get(id);};
+let featureDirty=false,featureInspection=null;
+function featureEditorState(){} function inspectionVector(text){return text.split(' ').map(Number);}
+featureEditorLoad({feature:previous});
+assert.equal(featureField('size').value,.3);
+featureField('size').value=String(featureField('size').value);
+assert.equal(featureRegionValues({name:'rim'}).feature.feature_size_mm,.3);
+featureField('size').value='.1';
+assert.equal(featureRegionValues({name:'rim'}).feature.feature_size_mm,.1);
+featureField('size').value='';
+assert.equal('feature_size_mm' in featureRegionValues({name:'rim'}).feature,false);
+featureEditorLoad({feature:{id:'old',feature_scale_mm:.4}});
+assert.equal(featureField('size').value,.4);
+""")
+
+
+def test_feature_exports_use_shared_download_and_discard_scale_edits_or_stale_results():
+    js([("function featureExportState(", "function featurePlot(")], """
+const entry={token:'build',target:{}},parts=new Map([['part',entry]]),current='part',sent=[],downloads=[];
+const WebSocket={OPEN:1},sock={readyState:1,send:value=>sent.push(JSON.parse(value))};
+const fields={json:{},svg:{},status:{},station:{value:'0'}},featureField=id=>fields[id];
+let featureDirty=false,featureInspection={token:'build',result:{id:'rim',identity:{token:'feature-.3'},cad:[{}]}};
+function featureEditorState(){featureExportState();}
+const window={downloadArtifact:async artifact=>{downloads.push(artifact);return {path:'/output/test.svg'};}};
+featureExport('svg'); assert.equal(sent[0].identity.token,'feature-.3');assert.equal(sent[0].station,0);
+const result={name:'part',token:'build',identity:{token:'feature-.3'},artifact:{filename:'rim.svg',mime:'image/svg+xml',data:'<svg/>'}};
+await featureExportLanded({...result,identity:{token:'feature-.1'}}); assert.equal(downloads.length,0);
+featureDirty=true; await featureExportLanded(result); featureExportState();
+assert.equal(downloads.length,0);assert.equal(fields.svg.disabled,true);
+featureDirty=false;entry.target.stale=true;await featureExportLanded(result);assert.equal(downloads.length,0);
+entry.target.stale=false;await featureExportLanded(result);assert.equal(downloads.length,1);
+assert.match(fields.status.textContent,/saved/);
+entry.token='rebuilt';await featureExportLanded(result);assert.equal(downloads.length,1);
+""")
+
+
+def test_feature_scale_identity_change_expires_contours_even_with_same_build_token():
+    js([("function featureEditorState(", "function featureInspect(")], """
+const fields={freshness:{},inspect:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{}};
+const featureField=id=>fields[id], current='part';
+function featureExportState(){}
+const selectedFeatureRegion=()=>({feature:{id:'rim',feature_size_mm:.1}});
+let featureInspection={name:'part',token:'same-build',result:{identity:{token:'old-scale'}}},featureDirty=false;
+featureEditorState({token:'same-build',target:{feature_evidence:[{id:'rim',status:'stale',identity:{token:'new-scale'}}]}});
+assert.equal(featureInspection,null);assert.equal(fields.review.disabled,true);
+assert.equal(fields.plot.hidden,true);assert.match(fields.status.textContent,/expired/);
 """)

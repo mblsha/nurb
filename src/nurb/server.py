@@ -1699,6 +1699,7 @@ class Server:
 
         if msg.get("type") == "target_verify":
             from .meshing import VerificationPolicy
+            from .feature_evidence import smallest_feature_size
 
             entry = self.state.get(name, {})
             target = entry.get("target") or {}
@@ -1711,7 +1712,8 @@ class Server:
                     raise ValueError("Build a valid model and attach a reference before verifying.")
                 policy = VerificationPolicy.for_tolerance(
                     target["tolerance_mm"], accuracy_mm=msg.get("accuracy_mm"),
-                    feature_size_mm=msg.get("feature_size_mm"), timeout_s=msg.get("timeout_s", 30.0),
+                    feature_size_mm=smallest_feature_size(target.get("regions", []), msg.get("feature_size_mm")),
+                    timeout_s=msg.get("timeout_s", 30.0),
                     max_triangles=msg.get("max_triangles", 1_000_000),
                 )
                 request["provenance"] = policy.provenance(target["tolerance_mm"])
@@ -1784,7 +1786,7 @@ class Server:
                 await self.reply(client, {"type": "target_inspection", "name": name, "error": str(exc)})
             return
 
-        if msg.get("type") == "feature_inspection":
+        if msg.get("type") in ("feature_inspection", "feature_export"):
             from . import compare, feature_evidence
 
             try:
@@ -1801,6 +1803,17 @@ class Server:
                         raise ValueError("save and select a unique feature before inspecting it")
                     region = selected[0]
                     card_bytes = path.with_suffix(".md").read_bytes()
+                    from . import checks
+                    declared = compare.setting(checks.settings(path))
+                    if (not declared or any(declared.get(key) != target.get(key) for key in ("file", "units", "tolerance_mm", "regions"))
+                            or (declared["transform"] is not None and declared["transform"] != target["transform"])):
+                        raise ValueError("reference or feature settings changed; wait for rebuilding before inspecting")
+                    source_snapshot = self._source_snapshot(path)
+                    source_set = self._build_sources(path, entry["shape"], source_snapshot)
+                    source_identity = self._build_inputs(source_set, source_snapshot)
+                    overrides_identity = repr(sorted((self.overrides.get(name) or {}).items()))
+                    if source_identity is None or self.prints.get(name) != (source_identity, overrides_identity, entry.get("shape_id")):
+                        raise ValueError("model inputs changed; wait for rebuilding before inspecting")
                     transform = list(target["transform"])
                     token = entry["token"]
                     stamp = target["stamp"]
@@ -1816,16 +1829,20 @@ class Server:
                         definitions = region["feature"].get("sections", [])
                         identity = feature_evidence.region_evidence(entry["evidence_geometry"], hit["content_id"],
                                                                    transform, entry.get("variant"), region)
-                        return {**identity, "frame": "part_mm", "method": "display mesh contours; no material fill or fit certification",
+                        from .meshing import display_provenance
+                        return {**identity, "frame": "part_mm", "method": "display mesh contours; not exact B-rep curves; no fit certification",
+                                "provenance": display_provenance(),
                                 "cad": feature_evidence.sections(cad, definitions),
                                 "reference": feature_evidence.sections(reference, definitions)}
 
                     result = await asyncio.to_thread(inspect_feature)
                     if (self.state.get(name) is not entry or target.get("stale") or target["transform"] != transform
                             or self._target_mesh(target["file"], target.get("units"))["stamp"] != stamp
-                            or path.with_suffix(".md").read_bytes() != card_bytes):
+                            or path.with_suffix(".md").read_bytes() != card_bytes
+                            or self._build_inputs(source_set, self._source_snapshot(path)) != source_identity
+                            or repr(sorted((self.overrides.get(name) or {}).items())) != overrides_identity):
                         raise ValueError("model, reference or feature changed during inspection; inspect again")
-                    if msg.get("save_review") is True:
+                    if msg["type"] == "feature_inspection" and msg.get("save_review") is True:
                         if msg.get("identity") != result["identity"]:
                             raise ValueError("inspect the current feature before recording its evidence")
                         updated = []
@@ -1838,10 +1855,26 @@ class Server:
                         target["stale"] = True
                         self.queue.put_nowait(str(path))
                         result["saved"] = True
-                    response = {"type": "feature_inspection", "name": name, "token": token, "result": result}
+                    if msg["type"] == "feature_export":
+                        if msg.get("identity") != result["identity"]:
+                            raise ValueError("section evidence expired; inspect the current feature before exporting")
+                        stem = feature_evidence.section_stem(name, result["id"])
+                        if msg.get("format") == "json":
+                            data = json.dumps(feature_evidence.section_payload(result), indent=2, allow_nan=False)
+                            filename, mime = f"{stem}-sections.json", "application/json"
+                        elif msg.get("format") == "svg":
+                            station = msg.get("station")
+                            data = feature_evidence.section_svg(result, station)
+                            filename, mime = f"{stem}-station-{station+1}.svg", "image/svg+xml"
+                        else:
+                            raise ValueError("choose JSON or SVG for local section evidence")
+                        response = {"type": "feature_export", "name": name, "token": token,
+                                    "identity": result["identity"], "artifact": {"filename": filename, "mime": mime, "data": data}}
+                    else:
+                        response = {"type": "feature_inspection", "name": name, "token": token, "result": result}
                 await self.reply(client, response)
             except (ValueError, OSError) as exc:
-                await self.reply(client, {"type": "feature_inspection", "name": name, "error": str(exc)})
+                await self.reply(client, {"type": msg["type"], "name": name, "error": str(exc)})
             return
 
         if msg.get("type") == "target_alignment":

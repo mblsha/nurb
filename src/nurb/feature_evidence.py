@@ -84,6 +84,19 @@ def feature_record(raw):
         if not np.isfinite(uncertainty) or uncertainty < 0:
             raise ValueError("feature uncertainty_mm must be finite and nonnegative")
         result["uncertainty_mm"] = uncertainty
+    # Older producers called this feature_scale_mm. Normalize that spelling on read;
+    # absence stays absent so existing reviews do not expire just from upgrading.
+    sizes = [raw[key] for key in ("feature_size_mm", "feature_scale_mm") if key in raw]
+    if sizes:
+        try:
+            values = [float(value) for value in sizes]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("feature_size_mm must be a positive finite size in mm") from exc
+        if any(isinstance(value, bool) for value in sizes) or any(not np.isfinite(value) or value <= 0 for value in values):
+            raise ValueError("feature_size_mm must be a positive finite size in mm")
+        if len(set(values)) != 1:
+            raise ValueError("feature_size_mm and legacy feature_scale_mm disagree; keep one size")
+        result["feature_size_mm"] = values[0]
     if "sections" in raw:
         if not isinstance(raw["sections"], list) or len(raw["sections"]) > 8:
             raise ValueError("feature sections needs at most 8 named section series")
@@ -162,7 +175,7 @@ def region_evidence(shape_id, reference_id, transform, configuration, region):
     feature = region["feature"]
     contract = {**feature, "selection": {key: region[key] for key in ("name", "bounds_mm", "component") if key in region}}
     identity = evidence_identity(shape_id, reference_id, transform, configuration, contract)
-    return {"id": feature["id"], "name": region["name"], **freshness(feature, identity)}
+    return {"id": feature["id"], "name": region["name"], "feature": feature, **freshness(feature, identity)}
 
 
 def selected_meshes(shape, cad, reference, region, component_meshes=None):
@@ -179,3 +192,87 @@ def selected_meshes(shape, cad, reference, region, component_meshes=None):
         cad = component_meshes[component.id] if component_meshes is not None else compare._part_mesh(component.solid, 0.1)
         bounds = {"min": cad.bounds[0].tolist(), "max": cad.bounds[1].tolist()}
     return compare._clip_region(cad, bounds), compare._clip_region(reference, bounds)
+
+
+def smallest_feature_size(regions, requested=None):
+    sizes = [region["feature"]["feature_size_mm"] for region in regions
+             if region.get("feature", {}).get("feature_size_mm") is not None]
+    if requested is not None:
+        sizes.append(feature_record({"id": "requested", "feature_size_mm": requested})["feature_size_mm"])
+    return min(sizes) if sizes else None
+
+
+def section_payload(result):
+    """A self-contained snapshot; freshness is tied to the included input identity."""
+    return {"schema_version": 1, "kind": "local-section-evidence", **result,
+            "limitation": "Contours intersect tessellated surfaces, not exact B-rep curves. Open contours remain open; neither mesh deflection nor these sections certifies physical fit."}
+
+
+def section_svg(result, station):
+    """Render one station without filling open loops or hiding its mesh provenance."""
+    from xml.etree.ElementTree import Element, SubElement, tostring
+
+    if isinstance(station, bool) or not isinstance(station, int) or not 0 <= station < len(result.get("cad", [])):
+        raise ValueError("choose a saved local section station before exporting SVG")
+    cuts = [result["cad"][station], result["reference"][station]]
+    payload = section_payload({**result, "cad": [cuts[0]], "reference": [cuts[1]]})
+    svg = Element("svg", xmlns="http://www.w3.org/2000/svg", width="900", height="640", viewBox="0 0 900 640")
+    SubElement(svg, "title").text = f'{result["name"]}: {cuts[0]["name"]} at {cuts[0]["offset_mm"]:g} mm'
+    SubElement(svg, "metadata").text = json.dumps(payload, sort_keys=True, allow_nan=False)
+    SubElement(svg, "rect", width="900", height="640", fill="#16181d")
+    def text(y, value, size="15"):
+        SubElement(svg, "text", x="24", y=str(y), fill="#ddd", **{"font-family": "sans-serif", "font-size": size}).text = value
+    text(30, f'{result["name"]} / {cuts[0]["name"]} / offset {cuts[0]["offset_mm"]:g} mm', "18")
+    provenance = result.get("provenance", {})
+    text(56, provenance.get("method", result.get("method", "Mesh contours")))
+    size = result.get("feature", {}).get("feature_size_mm")
+    text(79, f'Feature size: {size:g} mm' if size is not None else "Feature size: unspecified")
+    deflection = provenance.get("absolute_deflection_mm")
+    text(102, f'Requested deflection: {deflection:g} mm; achieved error unknown' if deflection is not None else "Display mesh accuracy in mm is unknown")
+    points = [point for cut in cuts for loop in cut.get("loops", []) for point in loop["points_mm"]]
+    if points:
+        data = np.asarray(points, dtype=float)
+        low, high = data.min(axis=0), data.max(axis=0)
+        scale = min(840 / max(.01, high[0]-low[0]), 360 / max(.01, high[1]-low[1]))
+        center = (low+high)/2
+        for cut, color in zip(cuts, ("#f0c274", "#62c7ef")):
+            for loop in cut.get("loops", []):
+                path = loop["points_mm"]
+                if loop["closed"] and path:
+                    path = [*path, path[0]]
+                coordinates = " ".join(f'{450+(point[0]-center[0])*scale:.6f},{320-(point[1]-center[1])*scale:.6f}' for point in path)
+                SubElement(svg, "polyline", points=coordinates, fill="none", stroke=color, **{"stroke-width": "1.5"})
+        text(538, f'u right; v up; {100/scale:.6g} mm per 100 SVG units. CAD amber; reference blue.')
+    else:
+        text(320, "This station misses both surfaces.")
+    text(568, "Tessellated contours, not exact B-rep curves. Open contours remain open.")
+    text(593, "No physical-fit certification. The JSON metadata retains frame, identity and full precision.", "13")
+    text(617, f'Evidence: {result["identity"]["token"]}', "11")
+    return tostring(svg, encoding="unicode", xml_declaration=True)
+
+
+def section_stem(configuration, feature_id):
+    label = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{configuration}.{feature_id}")
+    return f"{label}-{_digest([configuration, feature_id])[:8]}"
+
+
+def write_section_exports(directory, configuration, results):
+    from pathlib import Path
+
+    output = Path(directory)
+    if not any(result.get("cad") for result in results):
+        raise ValueError("section export needs a saved feature with local section stations")
+    output.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for result in results:
+        if not result.get("cad"):
+            continue
+        stem = section_stem(configuration, result["id"])
+        path = output / f"{stem}.sections.json"
+        path.write_text(json.dumps(section_payload(result), indent=2, allow_nan=False)+"\n", encoding="utf-8")
+        paths.append(str(path))
+        for station in range(len(result["cad"])):
+            path = output / f"{stem}.station-{station+1:02}.svg"
+            path.write_text(section_svg(result, station), encoding="utf-8")
+            paths.append(str(path))
+    return paths

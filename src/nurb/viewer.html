@@ -832,6 +832,7 @@
             <button id="featurelocate" type="button">Locate reference annotation</button>
             <label>Required features, one per line <textarea id="featurerequired" rows="2" placeholder="small inverse-T lip"></textarea></label>
             <label>Excluded features, one per line <textarea id="featureexcluded" rows="2" placeholder="nose cloth"></textarea></label>
+            <label>Smallest important feature (mm) <input id="featuresize" type="number" min="0.000001" step="0.01" placeholder="unknown"></label>
             <label>Scan uncertainty (mm) <input id="featureuncertainty" type="number" min="0" step="0.01" placeholder="unknown"></label>
             <label>Evidence links or project paths, one per line <textarea id="featurelinks" rows="2"></textarea></label>
             <label>Notes <textarea id="featurenotes" rows="2"></textarea></label>
@@ -848,6 +849,9 @@
             <button id="featurereview" type="button" disabled>Record this inspection</button>
             <label>Inspection note <input id="featurereviewnote" placeholder="what these cuts establish or leave uncertain"></label>
             <div id="featurestatus" role="status"></div>
+            <button id="featurejson" type="button" disabled>Export section JSON</button>
+            <button id="featuresvg" type="button" disabled>Export station SVG</button>
+            <p>These exports use the display mesh, whose accuracy in mm is unknown. They retain the feature identity and scale; contours are tessellated estimates, not exact CAD curves.</p>
             <select id="featurestation" aria-label="Local section station" hidden></select>
             <svg id="featureplot" viewBox="0 0 360 240" role="img" aria-label="Aligned CAD and reference local section" hidden style="width:100%;background:#16181d;border:1px solid #454a54"></svg>
           </details>
@@ -1888,6 +1892,9 @@ function featureRegionValues(region) {
   for (const key of ['required','excluded','links']) feature[key] = featureField(key).value.split('\n').map(line => line.trim()).filter(Boolean);
   const point = featureField('point').value.trim();
   if (point) feature.reference_point_mm = inspectionVector(point,'Reference annotation'); else delete feature.reference_point_mm;
+  const size = featureField('size').value.trim();
+  if (size) feature.feature_size_mm = Number(size); else delete feature.feature_size_mm;
+  delete feature.feature_scale_mm;
   const uncertainty = featureField('uncertainty').value.trim();
   if (uncertainty) feature.uncertainty_mm = Number(uncertainty); else delete feature.uncertainty_mm;
   if (featureField('sectionenabled').checked) {
@@ -1908,6 +1915,7 @@ function featureEditorLoad(region) {
   for (const key of ['role','configuration','orientation','notes']) featureField(key).value = feature?.[key] || '';
   for (const key of ['required','excluded','links']) featureField(key).value = (feature?.[key] || []).join('\n');
   featureField('point').value = feature?.reference_point_mm?.join(' ') || '';
+  featureField('size').value = feature?.feature_size_mm ?? feature?.feature_scale_mm ?? '';
   featureField('uncertainty').value = feature?.uncertainty_mm ?? '';
   featureField('sectionenabled').checked = !!section;
   for (const [id,key,fallback] of [['origin','origin_mm',[0,0,0]],['normal','normal',[0,0,1]],['x','x_direction',[1,0,0]],['offsets','offsets_mm',[0]]]) featureField(id).value = (section?.[key] || fallback).join(' ');
@@ -1925,10 +1933,12 @@ function featureEditorState(entry) {
     : record?.status === 'stale' ? 'Evidence stale: geometry, reference, alignment or feature contract changed. Inspect again.'
     : 'No inspection recorded for this feature.';
   featureField('inspect').disabled = featureDirty || !selected?.feature || !!entry?.target?.stale;
-  if (featureInspection && (featureInspection.name !== current || featureInspection.token !== entry?.token || entry?.target?.stale)) {
+  if (featureInspection && (featureInspection.name !== current || featureInspection.token !== entry?.token || entry?.target?.stale
+      || (record?.identity && record.identity.token !== featureInspection.result?.identity?.token))) {
     featureInspection = null; featureField('review').disabled = true; featureField('plot').setAttribute('hidden',''); featureField('station').hidden = true;
-    featureField('status').textContent = 'Displayed sections expired after a rebuild or reference change. Inspect again.';
+    featureField('status').textContent = 'Displayed sections expired after a rebuild, reference or feature change. Inspect again.';
   }
+  featureExportState();
 }
 function featureInspect(save = false) {
   const region = selectedFeatureRegion();
@@ -1936,6 +1946,7 @@ function featureInspect(save = false) {
   if (save && (!featureInspection || featureInspection.token !== parts.get(current)?.token)) return;
   featureField('review').disabled = true;
   if (!save) { featureInspection = null; featureField('plot').setAttribute('hidden',''); featureField('station').hidden = true; }
+  featureExportState();
   featureField('status').textContent = save ? 'Recording current inspection…' : 'Measuring aligned local sections…';
   sock.send(JSON.stringify({type:'feature_inspection',name:current,token:parts.get(current)?.token,
     feature_id:region.feature.id,save_review:save,identity:save ? featureInspection.result.identity : undefined,
@@ -1951,7 +1962,33 @@ function featureInspectionLanded(message) {
   select.hidden = !result.cad.length; featureField('plot').toggleAttribute('hidden',!result.cad.length);
   featureField('status').textContent = result.saved ? 'Inspection recorded; it does not assert physical fit.' : result.cad.length ? 'CAD amber; reference blue. Same local millimetre frame. Open contours remain open. Display mesh estimate.' : 'Feature identity captured. Add a saved local section to compare profiles.';
   featureField('review').disabled = !!result.saved;
+  featureExportState();
   featurePlot();
+}
+function featureExportState() {
+  const ready = !featureDirty && featureInspection?.token === parts.get(current)?.token
+    && !parts.get(current)?.target?.stale && featureInspection?.result?.id
+    && featureInspection?.result?.identity?.token && featureInspection?.result?.cad?.length;
+  featureField('json').disabled = !ready;
+  featureField('svg').disabled = !ready;
+}
+function featureExport(format) {
+  featureEditorState(parts.get(current));
+  if (featureDirty || !featureInspection || featureField(format).disabled || !sock || sock.readyState !== WebSocket.OPEN) return;
+  featureField('status').textContent = 'Preparing current section evidence…';
+  sock.send(JSON.stringify({type:'feature_export',name:current,token:featureInspection.token,
+    feature_id:featureInspection.result.id,identity:featureInspection.result.identity,
+    format,station:Number(featureField('station').value || 0)}));
+}
+async function featureExportLanded(message) {
+  if (message.name !== current) return;
+  if (message.error) { featureField('status').textContent = message.error; return; }
+  if (featureDirty || message.token !== parts.get(current)?.token || parts.get(current)?.target?.stale
+      || message.identity?.token !== featureInspection?.result?.identity?.token) return;
+  try {
+    const saved = await window.downloadArtifact(message.artifact);
+    featureField('status').textContent = saved?.path ? 'Section evidence saved.' : 'Section evidence download started.';
+  } catch (error) { featureField('status').textContent = `Could not export section evidence: ${error.message}`; }
 }
 function featurePlot() {
   if (!featureInspection) return;
@@ -1986,11 +2023,14 @@ document.getElementById('regioneditor').addEventListener('input', event => {
   if (['regionexisting','featurestation','featurereviewnote'].includes(event.target.id)) return;
   featureDirty = true; featureInspection = null; featureField('review').disabled = true;
   featureField('inspect').disabled = true; featureField('plot').setAttribute('hidden',''); featureField('station').hidden = true;
+  featureExportState();
   featureField('status').textContent='Save the edited region before inspecting or recording its evidence.';
 });
 featureField('inspect').onclick = () => featureInspect();
 featureField('review').onclick = () => featureInspect(true);
 featureField('station').onchange = featurePlot;
+featureField('json').onclick = () => featureExport('json');
+featureField('svg').onclick = () => featureExport('svg');
 
 // ---- separately budgeted precise comparison ----
 const verificationHistory = new Map();
@@ -5382,6 +5422,7 @@ function connect() {
     if (msg.type === 'target_components') importLanded(msg);
     if (msg.type === 'target_alignment') datumLanded(msg);
     if (msg.type === 'feature_inspection') featureInspectionLanded(msg);
+    if (msg.type === 'feature_export') featureExportLanded(msg);
     if (msg.type === 'target_verification') verificationLanded(msg);
     if (msg.type === 'stressed') stressLanded(msg);
     if (msg.type === 'checked') {
