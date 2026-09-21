@@ -281,6 +281,7 @@ def test_cli_rejects_reference_changes_during_section_measurement(tmp_path, monk
 def test_section_export_filename_normalization_cannot_collide():
     assert evidence.section_stem("part", "rim:left") != evidence.section_stem("part", "rim_left")
     assert ":" not in evidence.section_stem("part", "rim:left")
+    assert len(evidence.section_stem("a"*120, "b"*96)) == 129
 
 
 def test_server_precise_verification_keeps_smallest_saved_feature_scale(tmp_path, monkeypatch):

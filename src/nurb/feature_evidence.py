@@ -253,7 +253,7 @@ def section_svg(result, station):
 
 def section_stem(configuration, feature_id):
     label = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{configuration}.{feature_id}")
-    return f"{label}-{_digest([configuration, feature_id])[:8]}"
+    return f"{label[:120]}-{_digest([configuration, feature_id])[:8]}"
 
 
 def write_section_exports(directory, configuration, results):
