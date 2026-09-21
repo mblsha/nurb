@@ -167,7 +167,7 @@ def build(path, overrides=None, draft=False):
     return shape, params, elapsed
 
 
-def _triangulate(shape, tolerance, up=(0, 0, 1)):
+def _triangulate(shape, tolerance, up=(0, 0, 1), *, remesh=True):
     """Vertices and triangles, read straight out of OCCT.
 
     This is what `Shape.tessellate` does, and it exists because of one line in it.
@@ -185,7 +185,8 @@ def _triangulate(shape, tolerance, up=(0, 0, 1)):
     from OCP.TopAbs import TopAbs_Orientation
     from OCP.TopLoc import TopLoc_Location
 
-    shape.mesh(tolerance)
+    if remesh:
+        shape.mesh(tolerance)
     up = Vector(*up).normalized()
     # Flat ceilings above the bed get tinted, the way a slicer previews bridges: these
     # are the surfaces the printer lays on air, and they are otherwise invisible in a

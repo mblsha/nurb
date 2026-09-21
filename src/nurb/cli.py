@@ -918,6 +918,7 @@ def cmd_compare(args):
     read the same declaration. --against exists for the one-off question.
     """
     from . import builder, checks, compare
+    from .meshing import MeshingError, VerificationPolicy
 
     root = project_root()
     named = args.part is not None
@@ -1050,6 +1051,13 @@ def cmd_compare(args):
                         tolerance_mm=tolerance_mm,
                         transform=active_transform,
                         regions=regions,
+                        mesh_policy=VerificationPolicy.for_tolerance(
+                            tolerance_mm,
+                            accuracy_mm=getattr(args, "mesh_accuracy", None),
+                            feature_size_mm=getattr(args, "feature_size", None),
+                            timeout_s=getattr(args, "mesh_timeout", 30.0),
+                            max_triangles=getattr(args, "mesh_triangles", 1_000_000),
+                        ),
                     )
                 if any("feature" in region for region in regions):
                     import hashlib
@@ -1075,6 +1083,7 @@ def cmd_compare(args):
                             "part": path.stem,
                             "configuration": name,
                             "reason": str(exc),
+                            **({"status": "unknown"} if isinstance(exc, MeshingError) else {}),
                         }
                     )
                     if args.save_alignment and not saved:
@@ -1126,6 +1135,8 @@ def cmd_compare(args):
                     "persisted": bool(applied_alignment == "stored" or just_saved),
                     "saved_by_this_run": bool(just_saved),
                 },
+                "status": "measured",
+                "provenance": metrics.get("provenance"),
                 "sample_counts": metrics["sample_count"],
                 "directions": {
                     "part_to_target": _structured_direction(metrics["part"]),
@@ -1790,6 +1801,10 @@ def main(argv=None):
         action="store_true",
         help="store the applied transform for the card's declared reference",
     )
+    s.add_argument("--mesh-accuracy", type=float, help="requested absolute CAD mesh deflection in mm (default: min(0.025, tolerance/4))")
+    s.add_argument("--feature-size", type=float, help="smallest mating feature in mm; warn when mesh accuracy cannot resolve it")
+    s.add_argument("--mesh-timeout", type=float, default=30.0, help="meshing time budget in seconds, at most 120 (default 30)")
+    s.add_argument("--mesh-triangles", type=int, default=1_000_000, help="triangle limit for each verification mesh (default 1000000)")
     s.add_argument("--json", action="store_true", help="write complete structured comparison evidence")
     s.add_argument("--region", action="append", metavar="NAME=BOX", help="inspect NAME=x0,y0,z0:x1,y1,z1 in part mm, or NAME=@component; repeat to name regions")
     s.add_argument("--regions-file", metavar="JSON_FILE", help="read named regions with semantic feature evidence and saved local section series")

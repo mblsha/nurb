@@ -15,6 +15,7 @@ import json
 import pathlib
 import re
 import shutil
+import time
 
 import numpy as np
 
@@ -227,6 +228,8 @@ def against(
     part_mesh=None,
     component_meshes=None,
     provenance=None,
+    mesh_policy=None,
+    stop=None,
 ):
     """Return bidirectional deviation, tolerance coverage, and spatial samples.
 
@@ -240,9 +243,20 @@ def against(
     # the browser, so it can pass that here without asking OCCT to mesh an assembly
     # compound a second time. Some compounds make that second pass pathologically
     # slow and starve the server's event loop even from a worker thread.
-    part = _part_mesh(shape, tolerance_mm) if part_mesh is None else part_mesh
+    from .meshing import VerificationPolicy, check_cancelled, display_provenance
+
+    check_cancelled(stop)
+    policy = mesh_policy or VerificationPolicy.for_tolerance(tolerance_mm)
+    deadline = time.monotonic() + policy.timeout_s
+    if part_mesh is None:
+        part = _part_mesh(shape, tolerance_mm, policy, deadline, stop)
+        provenance = policy.provenance(tolerance_mm)
+    else:
+        part = part_mesh
+        provenance = provenance or display_provenance()
     if not len(part.faces):
         raise ValueError("the part has no surface to compare")
+    provenance = {**provenance, "cad_triangles": len(part.faces), "measured_error_bound_mm": None}
     matrix = _transform(transform) if transform is not None else np.asarray(centered_transform(part, mesh)).reshape(4, 4)
     moved = mesh.copy()
     moved.apply_transform(matrix)
@@ -252,7 +266,9 @@ def against(
     part_surface = _surface(part)
     target_surface = _surface(moved)
     part_d, on_target = _to_surface(part_points, target_surface, closest=True)
+    check_cancelled(stop)
     target_d, on_part = _to_surface(target_points, part_surface, closest=True)
+    check_cancelled(stop)
 
     # A point already known to lie on one surface is a useful directed sample of that surface. Folding nearest points back catches a local recess or boss from both directions without pretending the additional points are area-weighted statistics.
     on_part = _refinement(on_part, target_d, tolerance_mm)
@@ -298,6 +314,7 @@ def against(
     }
     if provenance is not None:
         result["provenance"] = provenance
+    check_cancelled(stop)
     if regions:
         result["inspection_regions"] = [
             _inspect_region(
@@ -310,6 +327,9 @@ def against(
                 tolerance_mm,
                 component_meshes=component_meshes,
                 provenance=provenance,
+                mesh_policy=policy,
+                deadline=deadline,
+                stop=stop,
             )
             for region in inspection_regions(regions)
         ]
@@ -343,7 +363,12 @@ def _inspect_region(
     *,
     component_meshes=None,
     provenance=None,
+    mesh_policy=None,
+    deadline=None,
+    stop=None,
 ):
+    from .meshing import check_cancelled
+    check_cancelled(stop)
     result = {"name": region["name"], "selector": region, "frame": "part_mm"}
     if provenance is not None:
         result["provenance"] = provenance
@@ -355,7 +380,7 @@ def _inspect_region(
         if len(matches) != 1:
             return {**result, "status": "unresolved", "error": "choose a unique component ID or label from this assembly"}
         if component_meshes is None:
-            selected = _part_mesh(matches[0].solid, tolerance)
+            selected = _part_mesh(matches[0].solid, tolerance, mesh_policy, deadline, stop)
         else:
             selected = component_meshes.get(matches[0].id)
             if selected is None:
@@ -430,6 +455,10 @@ def report(name, file, metrics, unit, source):
             )
     else:
         lines.insert(3, "      no sampled deviation above tolerance detected")
+    provenance = metrics.get("provenance", {})
+    if provenance:
+        lines.append(f"      mesh: {provenance.get('method', 'unspecified')}; requested absolute deflection {provenance.get('absolute_deflection_mm')} mm")
+        lines.extend(f"      {warning}" for warning in provenance.get("warnings", []))
     for region in metrics.get("inspection_regions", []):
         lines.append(f"      inspection {region['name']}: {region['status']}")
         for side in ("part", "target"):
@@ -736,17 +765,18 @@ def _transform(raw):
     return matrix
 
 
-def _part_mesh(shape, tolerance_mm):
-    """Tessellate with an absolute error budget below the acceptance tolerance."""
-    from OCP.BRepMesh import BRepMesh_IncrementalMesh
-    from OCP.BRepTools import BRepTools
+def _part_mesh(shape, tolerance_mm, policy=None, deadline=None, stop=None):
+    """An absolute verification mesh with a shared wall-clock meshing budget."""
+    from dataclasses import replace
+    from .meshing import MeshingError, VerificationPolicy, verification_mesh
 
-    from . import builder
-
-    deflection = min(0.025, tolerance_mm / 4.0)
-    BRepTools.Clean_s(shape.wrapped)
-    BRepMesh_IncrementalMesh(shape.wrapped, deflection, False, 0.05, True)
-    return builder.to_mesh(shape, deflection)
+    policy = policy or VerificationPolicy.for_tolerance(tolerance_mm)
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MeshingError("Verification unknown: the meshing time budget was exhausted before all components were measured.")
+        policy = replace(policy, timeout_s=min(policy.timeout_s, remaining))
+    return verification_mesh(shape, policy, stop)
 
 
 def _center(mesh):

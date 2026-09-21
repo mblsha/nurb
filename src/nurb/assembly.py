@@ -495,8 +495,11 @@ def _hits(moved, others):
         try:
             common = moved & other
             vol = common.volume if common else 0.0
-        except Exception:  # an empty boolean, depending on kernel mood
-            vol = 0.0
+            if not math.isfinite(vol) or vol < 0:
+                raise ValueError("the kernel returned an invalid overlap volume")
+        except Exception as exc:
+            label = getattr(other, "label", "") or "a fixed part"
+            raise ValueError(f"intersection with {label} could not be verified: {type(exc).__name__}: {exc}") from exc
         if vol > max(_EPS, worst):
             bb = common.bounding_box()
             # A real intersection is a subset of both inputs. OCCT handed a
@@ -505,7 +508,7 @@ def _hits(moved, others):
             # names the solid to fix, where a silent zero would hide it and a
             # phantom finding would send someone redesigning a working hinge.
             label = getattr(other, "label", "") or "a fixed part"
-            if not _inside(bb, other.bounding_box()):
+            if not _inside(bb, other.bounding_box()) or not _inside(bb, box):
                 raise ValueError(
                     f"intersecting with {label} returned geometry outside it "
                     f"({vol:.0f}mm3) -- that solid is likely degenerate"
@@ -529,12 +532,23 @@ def check_clearances(scene, stop=None):
         if stop and stop():
             raise Interrupted
         first, second = fit.first, fit.second
-        volume, overlap = _hits(first.solid, [second.solid])
-        if volume:
-            distance, where = 0.0, overlap[:3]
-        else:
-            distance, a, b = first.solid.distance_to_with_closest_points(second.solid)
-            where = tuple((a + b).multiply(0.5))
+        try:
+            volume, overlap = _hits(first.solid, [second.solid])
+            if volume:
+                distance, where = 0.0, overlap[:3]
+            else:
+                distance, a, b = first.solid.distance_to_with_closest_points(second.solid)
+                where = tuple((a + b).multiply(0.5))
+                if not math.isfinite(distance):
+                    raise ValueError("the kernel returned a non-finite distance")
+        except Exception as exc:
+            found.append(Finding(
+                "clearance", FAIL,
+                f"Clearance unknown for {first.label} and {second.label}: {exc}",
+                components=(first.id, second.id),
+                measurements={"status": "unknown", "minimum_mm": fit.minimum},
+            ))
+            continue
         if not volume and distance + 1e-7 >= fit.minimum:
             continue
         pair = f"{first.label} and {second.label}"

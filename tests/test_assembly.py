@@ -532,3 +532,30 @@ def outer(angle=30.0):
     camera = next(c for c in shape._nurb_scene.components if c.label == "camera")
     assert camera.role == "context"
     assert tuple(camera.solid.bounding_box().center()) == pytest.approx((2 * 3 ** 0.5, 2, 0))
+
+
+def test_failed_boolean_is_an_unknown_clearance_not_zero_overlap():
+    from build123d import Box
+    from types import SimpleNamespace
+    from nurb.assembly import _hits, check_clearances
+
+    class BrokenBoolean:
+        label = "broken mount"
+
+        def bounding_box(self):
+            return Box(2, 2, 2).bounding_box()
+
+        def __and__(self, other):
+            raise RuntimeError("kernel refused the intersection")
+
+    first = SimpleNamespace(id="mount_1", label="mount", solid=BrokenBoolean())
+    second = SimpleNamespace(id="camera_1", label="camera", solid=Box(2, 2, 2))
+    scene = SimpleNamespace(clearances=[SimpleNamespace(first=first, second=second, minimum=0.2)])
+    with pytest.raises(ValueError, match="could not be verified"):
+        _hits(first.solid, [second.solid])
+    finding, = check_clearances(scene)
+    assert finding.value is None
+    assert finding.where is None
+    assert finding.components == ("mount_1", "camera_1")
+    assert finding.measurements == {"status": "unknown", "minimum_mm": 0.2}
+    assert "Clearance unknown" in finding.message
