@@ -2502,7 +2502,12 @@ function importCancel() {
   if (importPreview) {
     const {root, original, owner, source} = importPreview;
     root.removeFromParent(); referenceDispose(root, false); referenceDispose(source, true);
-    if (owner === mesh) owner.add(original); else referenceDispose(original, false);
+    if (owner === mesh) {
+      // Alignment previews can move the source root while the saved reference is detached.
+      original.matrix.copy(root.matrix); original.matrixAutoUpdate = root.matrixAutoUpdate;
+      original.matrixWorldNeedsUpdate = true;
+      owner.add(original);
+    } else referenceDispose(original, false);
   }
   importPreview = null;
   document.getElementById('importselection').hidden = true;

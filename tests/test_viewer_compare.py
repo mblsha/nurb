@@ -420,3 +420,52 @@ const document={querySelectorAll:()=>[{value:'component-1'}],getElementById:id=>
 importVisibility();assert.equal(first.visible,true);assert.equal(second.visible,false);
 assert.equal(apply.disabled,false);assert.match(status.textContent,/saved reference until you save/);
 """)
+
+
+@pytest.mark.parametrize("alignment_first", [False, True])
+@pytest.mark.parametrize("cancel_alignment", [False, True])
+def test_component_preview_cancel_preserves_visible_alignment_before_apply(alignment_first, cancel_alignment):
+    alignment = function("function comparisonCenteredTransform(", "function comparisonWorst(")
+    components = function("function importCancel()", "document.getElementById('importpreview').onclick")
+    run_js(f"import * as THREE from {json.dumps(THREE)};\n" + "import assert from 'node:assert/strict';\n" + """
+const current = 'fixture', sent = [], comparePending = new Map(), comparePreview = new Map();
+const WebSocket = {OPEN:1}, sock = {readyState:1,send:text=>sent.push(JSON.parse(text))};
+const saved = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+const moved = [0,-1,0,5, 1,0,0,7, 0,0,1,9, 0,0,0,1];
+const entry = {token:'built',target:{stamp:'source',transform:saved,import:{excluded_components:[]}}};
+const parts = new Map([[current,entry]]), mesh = new THREE.Group(); mesh.userData.token='built';
+const original = new THREE.Group(); original.name='target'; original.matrixAutoUpdate=false;
+original.matrix.set(...saved); mesh.add(original);
+let importPreview = null;
+const elements = new Map();
+const document = {
+  getElementById(id) { if (!elements.has(id)) elements.set(id,{replaceChildren(){},append(){},textContent:''}); return elements.get(id); },
+  querySelectorAll:()=>[{value:'component-1'}],
+  createElement:()=>({append(){}}), createTextNode:text=>text,
+};
+const loader = {parseAsync:async()=>({scene:new THREE.Group()})};
+function referenceSanitizeScene(scene) {return scene;}
+function referenceInstance() {const root=new THREE.Group();root.name='target';return root;}
+function referenceDispose() {}
+function inspectionSetMode() {}
+function compareClear() {} function comparePanel() {}
+function compareInvalidate(reason) {comparePending.set(current,{reason,token:entry.token});}
+""" + alignment + components + f"""
+const alignmentFirst = {json.dumps(alignment_first)}, cancelAlignment = {json.dumps(cancel_alignment)};
+if (alignmentFirst) comparisonPreview(moved,'Alignment preview');
+await importLanded({{name:current,stamp:'source',glb:'AA==',import:{{components:[{{id:'component-1',triangles:1}}]}}}});
+assert.ok(importPreview); assert.notEqual(mesh.getObjectByName('target'),original);
+if (!alignmentFirst) comparisonPreview(moved,'Symmetry plane alignment preview');
+if (cancelAlignment) compareAlignment('cancel');
+const visibleBeforeCancel = comparisonTransform(mesh.getObjectByName('target').matrix);
+importCancel();
+assert.equal(mesh.getObjectByName('target'),original);
+assert.deepEqual(comparisonTransform(original.matrix),visibleBeforeCancel);
+assert.deepEqual(visibleBeforeCancel,cancelAlignment ? saved : moved);
+assert.equal(comparePreview.has(current),!cancelAlignment);
+compareAlignment('apply');
+assert.equal(sent.length,1);
+assert.deepEqual(sent[0],{{type:'target_settings',name:current,transform:comparisonTransform(original.matrix)}});
+assert.deepEqual(comparePending.get(current).transform,comparisonTransform(original.matrix));
+assert.deepEqual(entry.target.transform,saved);
+""")
