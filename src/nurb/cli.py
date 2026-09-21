@@ -911,6 +911,11 @@ def _inspection_region(value):
         raise ValueError(f"region {value!r}: use NAME=x0,y0,z0:x1,y1,z1 or NAME=@component ({exc})") from exc
 
 
+def cmd_symmetry(args):
+    from .symmetry import command
+    command(args)
+
+
 def cmd_compare(args):
     """Measure a part against the mesh it is remodelling, both directions.
 
@@ -1810,6 +1815,26 @@ def main(argv=None):
     s.add_argument("--save-regions", action="store_true", help="persist the named inspection regions in the reference card")
     s.add_argument("--datum", metavar="JSON", help='preview plane, axis, or landmarks alignment in the current part frame; combine with --save-alignment to persist')
     s.set_defaults(fn=cmd_compare)
+
+    s = sub.add_parser("symmetry", help="fit reference symmetry and check the finished trimmed CAD")
+    s.add_argument("part", nargs="?")
+    s.add_argument("--against", help="reference mesh or PLY/PLY.GZ point cloud")
+    s.add_argument("--units", choices=("mm", "cm", "m", "in"))
+    s.add_argument("--axis", choices=("x", "y", "z"), default="x", help="approximate symmetry-plane normal")
+    s.add_argument("--variant", help="named model configuration")
+    s.add_argument("--identity-alignment", action="store_true", help="use original millimetre coordinates instead of the card transform")
+    s.add_argument("--reference-tolerance", type=float, default=0.5, help="reference per-side p95 threshold in mm")
+    s.add_argument("--cad-tolerance", type=float, default=0.01, help="finished CAD sampled maximum threshold in mm")
+    s.add_argument("--edge-step", type=float, default=0.5, help="maximum CAD trim-edge sampling step in mm")
+    s.add_argument("--face-samples", type=int, default=25, help="interior UV samples per face before trim classification")
+    s.add_argument("--sample-budget", type=int, default=20000)
+    s.add_argument("--timeout", type=float, default=30.0, help="worker time limit in seconds, at most 120")
+    s.add_argument("--max-angle", type=float, default=15.0, help="maximum normal tilt search in degrees")
+    s.add_argument("--bounds", help='fit region in part mm as JSON: {"min":[x,y,z],"max":[x,y,z]}')
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--output", help="save evidence JSON")
+    s.add_argument("--check-report", help="check whether saved evidence still matches current inputs")
+    s.set_defaults(fn=cmd_symmetry)
 
     s = sub.add_parser("skill", help="print an agent skill file for your AI harness")
     s.add_argument("--sync", action="store_true", help="rewrite installed copies from this package instead of printing")

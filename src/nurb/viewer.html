@@ -199,6 +199,12 @@
   #cut button.on { color: var(--accent); background: rgba(110,231,168,.1); }
   #cut input { width: 110px; margin: 0 6px 0 4px; }
   #comparepanel { width: 390px; max-width: calc(100vw - 268px); max-height: calc(100vh - 150px); overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(29,32,39,.96); box-shadow: 0 4px 16px rgba(0,0,0,.25); font-size: 11px; }
+  #symmetrypanel label { display:block; margin:7px 0; }
+  #symmetrypanel input[type=number], #symmetrypanel select { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:3px 5px; }
+  #symmetrypanel input[type=number] { width:85px; }
+  #symmetrypanel p { margin:8px 0; line-height:1.45; color:var(--dim); }
+  #symmetrypanel summary { cursor:pointer; padding:6px 0; }
+  #symmetrysource, #symmetrystatus { margin:8px 0; overflow-wrap:anywhere; }
   #comparepanel[hidden] { display: none; }
   #comparepanel h2 { font-size: 12px; display: flex; justify-content: space-between; margin-bottom: 7px; }
   #comparefile { overflow-wrap: anywhere; color: var(--text); }
@@ -717,6 +723,29 @@
     <div id="print"></div>
     <section id="comparepanel" aria-label="Compare CAD with reference" hidden>
       <h2>Compare <button id="compareclose" aria-label="close comparison panel">close</button></h2>
+      <details id="symmetrypanel"><summary>Symmetry evidence</summary>
+        <p>Fit the reference plane, then check both sides of the finished CAD, including trimmed faces and hole edges. The reference coordinates and bytes stay unchanged.</p>
+        <div id="symmetrysource"></div><button id="symmetrycloud">Choose point cloud…</button> <button id="symmetryattached">Use attached reference</button>
+        <label>Point cloud source units <select id="symmetryunits"><option>mm</option><option>cm</option><option>m</option><option>in</option></select></label>
+        <input id="symmetryfile" type="file" accept=".ply,.ply.gz" hidden>
+        <label>Approximate plane normal <select id="symmetryaxis"><option value="x">X (left / right)</option><option value="y">Y</option><option value="z">Z</option></select></label>
+        <label>Reference p95 threshold (mm) <input id="symmetryreftol" type="number" min="0.0001" step="0.1" value="0.5"></label>
+        <label>CAD maximum threshold (mm) <input id="symmetrycadtol" type="number" min="0.000001" step="0.01" value="0.01"></label>
+        <details><summary>Sampling and fit bounds</summary>
+          <label>Reference fit region <select id="symmetryregion"><option value="">Whole reference</option></select></label>
+          <label>Edge sample spacing (mm) <input id="symmetrystep" type="number" min="0.001" step="0.1" value="0.5"></label>
+          <label>Interior samples per face <input id="symmetryfaces" type="number" min="9" max="400" value="25"></label>
+          <label>CAD sample budget <input id="symmetrybudget" type="number" min="100" max="100000" step="100" value="20000"></label>
+          <label>Fit search angle (degrees) <input id="symmetryangle" type="number" min="1" max="45" value="15"></label>
+          <label>Time budget (seconds) <input id="symmetryseconds" type="number" min="1" max="120" value="30"></label>
+          <p>The fit is a local search near the chosen axis. Select a symmetric region to exclude cloth or scan artifacts. The CAD check always covers the complete finished model.</p>
+        </details>
+        <button id="symmetryrun">Fit plane and check CAD</button> <button id="symmetrycancel" disabled>Cancel</button>
+        <div id="symmetrystatus" role="status"></div><div id="symmetryresult"></div>
+        <label><input id="symmetryshow" type="checkbox" checked>Show fitted plane</label>
+        <button id="symmetrypreview" disabled>Preview reference plane on axis</button> <button id="symmetrydownload" disabled>Save evidence JSON</button>
+        <p>Preview alignment moves the reference only. Apply it with the alignment controls, then run the check again. Finite samples and scan noise cannot prove perfect symmetry.</p>
+      </details>
       <div id="compareempty">Add a mesh to see where this editable CAD model differs from it.<label>Source units <select id="compareaddunits"><option>mm</option><option>cm</option><option>m</option><option>in</option></select></label><button id="compareadd">Add reference…</button><div id="compareemptystate" role="status"></div></div>
       <div id="compareattached">
         <div id="comparefile"></div>
@@ -2268,6 +2297,7 @@ function comparisonTransformFields(transform) {
 }
 
 function comparePanel(entry) {
+  symmetryPanel(entry);
   const target = entry?.target;
   const visible = compareOpen && (!!target || compareTouched);
   const button = document.getElementById('ghostbtn');
@@ -4692,6 +4722,141 @@ async function checkUpdate(installed) {
   } catch { /* offline; the badge already shows the installed version */ }
 }
 
+// Symmetry evidence is independent of display tessellation and current deviation colors.
+const symmetryReports = new Map(), symmetrySources = new Map(), symmetryRequests = new Map();
+let symmetryPlane = null;
+const symmetryElement = id => document.getElementById(id);
+function symmetryOptions(entry) {
+  const number = id => Number(symmetryElement(id).value);
+  const region = (entry?.target?.regions || []).find(r => r.name === symmetryElement('symmetryregion').value);
+  return {axis:symmetryElement('symmetryaxis').value, reference_tolerance_mm:number('symmetryreftol'),
+    cad_tolerance_mm:number('symmetrycadtol'), edge_step_mm:number('symmetrystep'), face_samples:number('symmetryfaces'),
+    sample_budget:number('symmetrybudget'), timeout_s:number('symmetryseconds'), max_angle_deg:number('symmetryangle'),
+    reference_bounds_mm:region?.bounds_mm || null};
+}
+function symmetryClearPlane() {
+  if (symmetryPlane) { scene.remove(symmetryPlane); symmetryPlane.geometry.dispose(); symmetryPlane.material.dispose(); symmetryPlane = null; }
+}
+function symmetryDrawPlane(report) {
+  symmetryClearPlane();
+  if (!mesh || !report?.plane || !symmetryElement('symmetryshow').checked || !compareOpen) return;
+  const bounds = new THREE.Box3().setFromObject(mesh), size = bounds.getSize(new THREE.Vector3()).length();
+  const normal = new THREE.Vector3(...report.plane.normal);
+  const center = bounds.getCenter(new THREE.Vector3()).sub(mesh.position);
+  center.addScaledVector(normal, report.plane.offset_mm - center.dot(normal)).add(mesh.position);
+  symmetryPlane = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicMaterial({color:0xffcb6b,transparent:true,opacity:.17,side:THREE.DoubleSide,depthWrite:false}));
+  symmetryPlane.name = 'symmetry-evidence-plane';
+  symmetryPlane.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),normal);
+  symmetryPlane.position.copy(center); scene.add(symmetryPlane);
+}
+function symmetryFresh(entry, report) {
+  return report?.status === 'measured' && report.token === entry?.token && !entry.error && !entry.target?.stale
+    && !comparePreview.has(entry.name) && !comparePending.has(entry.name)
+    && JSON.stringify(report.options) === JSON.stringify(symmetryOptions(entry));
+}
+function symmetryPanel(entry) {
+  const region = symmetryElement('symmetryregion'), selected = region.value;
+  const regions = (entry?.target?.regions || []).filter(r => r.bounds_mm);
+  const key = JSON.stringify(regions.map(r => [r.name,r.bounds_mm]));
+  if (region.dataset.key !== key) {
+    region.replaceChildren(new Option('Whole reference',''), ...regions.map(r => new Option(r.name,r.name)));
+    if (regions.some(r => r.name === selected)) region.value = selected;
+    region.dataset.key = key;
+  }
+  const report = symmetryReports.get(entry?.name) || entry?.symmetry;
+  if (report?.reference_kind === 'independent' && !symmetrySources.has(entry?.name)) symmetrySources.set(entry.name,{reference_file:report.reference_file,units:report.reference_units});
+  const source = symmetrySources.get(entry?.name);
+  const running = report?.token === entry?.token && ['running','cancelling'].includes(report?.status);
+  const fresh = symmetryFresh(entry, report);
+  symmetryElement('symmetrysource').textContent = source ? `Point cloud: ${source.filename || source.reference_file}` : `Reference: ${entry?.target?.file || 'choose a point cloud or attach a mesh'}`;
+  symmetryElement('symmetryrun').disabled = !entry || !sock || sock.readyState !== WebSocket.OPEN || running || !!comparePreview.get(entry?.name) || !!comparePending.get(entry?.name);
+  symmetryElement('symmetrycancel').disabled = !running || !report.request_id || report.status === 'cancelling';
+  symmetryElement('symmetryattached').disabled = !source || running;
+  symmetryElement('symmetrycloud').disabled = running;
+  symmetryElement('symmetryunits').disabled = running;
+  symmetryElement('symmetrypreview').disabled = !fresh || !!source || !entry?.target;
+  symmetryElement('symmetrydownload').disabled = !fresh;
+  const stale = report && report.status === 'measured' && !fresh;
+  symmetryElement('symmetrystatus').textContent = stale ? 'Evidence is stale. The model, alignment, source, or thresholds changed; run it again.'
+    : report?.error || (running ? report.phase || 'Verifying symmetry…' : report ? `Symmetry evidence: ${report.status}` : 'Choose an approximate normal and run the check. Coordinates use the current reference alignment.');
+  const result = symmetryElement('symmetryresult'); result.replaceChildren();
+  if (fresh) {
+    const p = report.plane, cad = report.cad, fixed = value => Number.isFinite(value) ? value.toFixed(4) : 'unknown';
+    const text = (value, tag='p') => { const node = document.createElement(tag); node.textContent = value; result.append(node); };
+    text(`Plane normal ${p.normal.map(n => n.toFixed(6)).join(', ')}; offset ${fixed(p.offset_mm)} mm.`);
+    text(`Reference: ${p.reference_status.replaceAll('_',' ')}. CAD: ${cad.status.replaceAll('_',' ')}.`);
+    const table = document.createElement('table');
+    for (const row of [['Side','Reference p95 mm','CAD max mm'], ...['negative','positive'].map(side => [side,fixed(p.reference_sides[side].p95_mm),fixed(cad.sides[side].max_mm)])]) {
+      const tr = table.insertRow(); row.forEach(value => { tr.insertCell().textContent = value; });
+    }
+    result.append(table);
+    text(`Trim edges max ${fixed(cad.trim_edges.max_mm)} mm; trimmed faces max ${fixed(cad.trimmed_faces.max_mm)} mm. ${cad.sample_count} CAD samples across ${cad.faces} faces and ${cad.edges} edges.`);
+    for (const warning of p.warnings) text(warning);
+    text(cad.limitation);
+    text(`Evidence ${report.identity.token.slice(0,12)} · source ${report.source_revision.slice(0,12)}`);
+  }
+  symmetryDrawPlane(fresh ? report : null);
+}
+function symmetryLanded(message) {
+  const entry = parts.get(message.name);
+  if (!entry || message.token !== entry.token) return;
+  const previous = symmetryReports.get(message.name);
+  if (message.status !== 'running' && previous?.request_id && previous.request_id !== message.request_id) return;
+  const requested = symmetryRequests.get(message.name);
+  if (message.status === 'measured' && requested && requested.source !== symmetrySources.get(message.name)) message = {...message,status:'stale',error:'The selected source changed during verification. Run it again.'};
+  symmetryReports.set(message.name,message); entry.symmetry = message;
+  if (message.reference_file && symmetrySources.has(message.name)) symmetrySources.set(message.name,{reference_file:message.reference_file,units:message.reference_units});
+  if (message.name === current) symmetryPanel(entry);
+}
+symmetryElement('symmetryrun').onclick = () => {
+  const entry = parts.get(current); if (!entry || !sock || sock.readyState !== WebSocket.OPEN) return;
+  const options = symmetryOptions(entry), source = symmetrySources.get(current);
+  const request = {type:'target_symmetry',name:current,options};
+  if (source?.data) request.cloud = source;
+  else if (source) Object.assign(request,source);
+  symmetryReports.set(current,{status:'running',token:entry.token,phase:'Starting symmetry verification…'});
+  symmetryRequests.set(current,{options,source}); symmetryPanel(entry); sock.send(JSON.stringify(request));
+};
+symmetryElement('symmetrycancel').onclick = () => {
+  const report = symmetryReports.get(current) || parts.get(current)?.symmetry;
+  if (!report?.request_id) return;
+  sock.send(JSON.stringify({type:'target_symmetry_cancel',name:current,token:report.token,request_id:report.request_id}));
+  symmetryReports.set(current,{...report,status:'cancelling',phase:'Cancelling symmetry verification…'}); symmetryPanel(parts.get(current));
+};
+symmetryElement('symmetrycloud').onclick = () => symmetryElement('symmetryfile').click();
+symmetryElement('symmetryfile').onchange = async event => {
+  const file = event.target.files?.[0], name = current; if (!file) return;
+  if (file.size > 48*1024*1024) { symmetryElement('symmetrystatus').textContent = 'Choose a point cloud smaller than 48 MiB.'; return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    symmetrySources.set(name,{filename:file.name,data:String(reader.result).split(',')[1],units:symmetryElement('symmetryunits').value});
+    symmetryReports.delete(name); const entry = parts.get(name); if (entry) delete entry.symmetry;
+    if (current === name) symmetryPanel(entry);
+  };
+  reader.onerror = () => { symmetryElement('symmetrystatus').textContent = 'The point cloud could not be read. Choose it again.'; };
+  reader.readAsDataURL(file); event.target.value = '';
+};
+symmetryElement('symmetryattached').onclick = () => {
+  symmetrySources.delete(current); symmetryReports.delete(current); const entry=parts.get(current); if(entry) delete entry.symmetry; symmetryPanel(entry);
+};
+symmetryElement('symmetryunits').onchange = () => {
+  const source = symmetrySources.get(current); if (source) source.units = symmetryElement('symmetryunits').value;
+  symmetryReports.delete(current); const entry=parts.get(current); if(entry) delete entry.symmetry; symmetryPanel(entry);
+};
+for (const id of ['symmetryaxis','symmetryreftol','symmetrycadtol','symmetryregion','symmetrystep','symmetryfaces','symmetrybudget','symmetryangle','symmetryseconds','symmetryshow']) symmetryElement(id).onchange = () => symmetryPanel(parts.get(current));
+symmetryElement('symmetrypreview').onclick = () => {
+  const report=symmetryReports.get(current) || parts.get(current)?.symmetry;
+  if (!symmetryFresh(parts.get(current),report)) return;
+  const matrix=comparisonMatrix(report.plane.to_axis_transform).multiply(comparisonMatrix(report.alignment));
+  comparisonPreview(comparisonTransform(matrix),'Symmetry plane alignment preview. Apply to save, then verify again.');
+};
+symmetryElement('symmetrydownload').onclick = () => {
+  const report=symmetryReports.get(current) || parts.get(current)?.symmetry;
+  if (!symmetryFresh(parts.get(current),report)) return;
+  const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));
+  const anchor=document.createElement('a'); anchor.href=url; anchor.download=`${current}-symmetry.json`; anchor.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
+
 // ---- socket ----
 
 // "This project has no parts" and "the socket is down" must not read the same:
@@ -4852,6 +5017,7 @@ function connect() {
       sharedRuns = msg.runs || [];
       sharedPanel(current);
     }
+    if (msg.type === 'target_symmetry') symmetryLanded(msg);
     if (msg.type === 'target_inspection') referenceInspectionLanded(msg);
     if (msg.type === 'target_alignment') datumLanded(msg);
     if (msg.type === 'feature_inspection') featureInspectionLanded(msg);

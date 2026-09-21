@@ -261,6 +261,7 @@ class Server:
         self.targets = {}
         self.verifications = {}
         self.verification_controls = {}
+        self.symmetry_jobs = {}
         # A legacy target has no stored frame. Center it once per server session and
         # hold that frame while the editable part changes, so an extremity edit does
         # not move the reference and disguise the actual difference.
@@ -1704,6 +1705,11 @@ class Server:
                 await self.reply(client, response)
             return
 
+        if msg.get("type") in ("target_symmetry", "target_symmetry_cancel"):
+            from .symmetry_service import handle
+            await handle(self, path, msg, client)
+            return
+
         if msg.get("type") == "target_inspection":
             from . import scan
 
@@ -2085,6 +2091,9 @@ class Server:
                 if destination:
                     paths.add(pathlib.Path(destination).resolve())
                 path = pathlib.Path(destination).resolve() if destination else source
+                if getattr(event, "event_type", "modified") in ("modified", "created", "deleted", "moved", "closed"):
+                    from .symmetry_service import changed
+                    changed(server, paths)
                 affected = []
                 # The watchdog callback runs on its own thread while drain replaces
                 # completed entries on the event loop. Snapshot before resolving files
