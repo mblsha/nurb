@@ -30,7 +30,9 @@ test("the native gzip filter accepts compressed PLY but rejects unrelated archiv
   assert.equal(referenceMeshSuffix("/downloads/scan.PLY.GZ"), ".ply.gz");
   assert.equal(referenceMeshSuffix("scan.ply"), ".ply");
   assert.equal(referenceMeshSuffix("scan.STL"), ".stl");
-  for (const path of ["scan.gz", "scan.stl.gz", "scan.ply.gz.backup", "scan.zip"]) {
+  for (const ext of ["zip", "obj", "glb", "step", "stp", "brep"]) assert.equal(referenceMeshSuffix(`scan.${ext}`), `.${ext}`);
+  assert.equal(referenceProjectName("light-seal-ply.zip"), "light-seal-ply");
+  for (const path of ["scan.gz", "scan.stl.gz", "scan.ply.gz.backup"]) {
     assert.equal(referenceMeshSuffix(path), null);
   }
 });

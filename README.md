@@ -192,6 +192,6 @@ nurb uses **Open CASCADE Technology** (OCCT) for all B-rep geometry, reached thr
 
 nurb **does** redistribute [three.js](https://threejs.org) r169 (MIT), vendored so the viewer works offline, with its `LICENSE` beside it. The viewer also includes [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (SIL OFL 1.1) with its `OFL.txt`, and the official 3DconnexionJS 0.7.0 browser adapter under the 3Dconnexion Software Development Kit license with its provenance and digest beside it.
 
-Other dependencies: trimesh (MIT), watchdog (Apache-2.0), websockets (BSD-3-Clause), numpy (BSD-3-Clause). Optional, for `nurb render` only: playwright (Apache-2.0).
+Other dependencies: Pillow (MIT-CMU, used for local texture validation and embedding), trimesh (MIT), watchdog (Apache-2.0), websockets (BSD-3-Clause), numpy (BSD-3-Clause). Optional, for `nurb render` only: playwright (Apache-2.0).
 
 npm note: nurb has no JavaScript to ship, so PyPI is the only install channel. [`@shpigford/nurb`](https://www.npmjs.com/package/@shpigford/nurb) just points `npx` users here.

@@ -209,12 +209,15 @@
   #comparepanel h2 { font-size: 12px; display: flex; justify-content: space-between; margin-bottom: 7px; }
   #comparefile { overflow-wrap: anywhere; color: var(--text); }
   #comparemeta, #comparestate, #compareemptystate, #comparelegend, #comparedisclaimer { color: var(--dim); margin-top: 5px; }
+  #importcomponentlist { max-height: 190px; overflow: auto; margin: 8px 0; }
+  #importcomponentlist label { display: flex; align-items: center; gap: 7px; margin: 5px 0; }
+  #importprovenance { overflow-wrap: anywhere; }
   #comparefileactions, #comparealignment { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
   #compareempty { color: var(--dim); line-height: 1.45; }
   #compareempty button { display: block; margin-top: 9px; color: var(--accent); }
   #comparetransform { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 7px; }
   #comparetransform label { color: var(--dim); }
-  #comparetransform input, #comparescale, #compareunits, #compareaddunits { width: 100%; box-sizing: border-box; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; }
+  #comparetransform input, #comparescale, #compareunits, #compareaddunits, #compareuploadunits { width: 100%; box-sizing: border-box; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; }
   #compareempty label { display: flex; align-items: center; gap: 7px; margin-top: 8px; }
   #comparesummary { color: var(--dim); margin-top: 5px; font-variant-numeric: tabular-nums; }
   #comparestate.bad, #compareemptystate.bad { color: var(--bad); }
@@ -746,11 +749,18 @@
         <button id="symmetrypreview" disabled>Preview reference plane on axis</button> <button id="symmetrydownload" disabled>Save evidence JSON</button>
         <p>Preview alignment moves the reference only. Apply it with the alignment controls, then run the check again. Finite samples and scan noise cannot prove perfect symmetry.</p>
       </details>
-      <div id="compareempty">Add a mesh to see where this editable CAD model differs from it.<label>Source units <select id="compareaddunits"><option>mm</option><option>cm</option><option>m</option><option>in</option></select></label><button id="compareadd">Add reference…</button><div id="compareemptystate" role="status"></div></div>
+      <div id="compareempty">Choose a mesh, a PLY with its PNG/JPEG sidecar, or a PLY ZIP bundle. Add a mesh to see where this editable CAD model differs from it.<label>Source units <select id="compareaddunits"><option>mm</option><option>cm</option><option>m</option><option>in</option></select></label><button id="compareadd">Add reference…</button><div id="compareemptystate" role="status"></div></div>
       <div id="compareattached">
         <div id="comparefile"></div>
         <div id="comparemeta"></div>
         <div id="comparefileactions"><button id="inspectreference">Inspect reference</button><button id="comparechange">Change reference…</button><button id="compareremove">Remove reference</button></div>
+        <label>Replacement file units <select id="compareuploadunits"><option>mm</option><option>cm</option><option>m</option><option>in</option></select></label>
+        <details id="importdetails" hidden><summary>Source assets and detached components</summary>
+          <p id="importprovenance"></p><p>All components are included initially. Preview connected pieces before excluding noise. Original source assets stay unchanged.</p>
+          <button id="importpreview">Preview source components</button><div id="importcomponentlist"></div>
+          <div id="importselection" hidden><button id="importapply">Save selected components</button><button id="importcancel">Cancel preview</button></div>
+          <p id="importstatus" role="status"></p>
+        </details>
         <div id="comparealignment"><button id="compareoriginal" title="preview the reference in its original coordinate frame">Preview original</button><button id="comparecenter" title="preview matching bounding-box centers without rotating or scaling the reference">Preview centered</button><button id="compareapply" title="save this previewed rigid transform in the part card">Apply alignment</button><button id="comparecancel">Cancel preview</button></div>
         <div id="comparetransform">
           <label>X mm<input data-transform="tx" type="number" step="0.1"></label><label>Y mm<input data-transform="ty" type="number" step="0.1"></label><label>Z mm<input data-transform="tz" type="number" step="0.1"></label>
@@ -759,7 +769,7 @@
         <div id="comparesummary"></div>
         <div id="comparecontrols">
           <label>View <select id="comparemode"><option value="model">Model</option><option value="reference">Reference</option><option value="overlay">Overlay</option><option value="deviation">Deviation</option><option value="side-by-side">Side by side</option><option value="section">Section</option></select></label><input id="compareoverlay" type="checkbox" hidden>
-          <label>source units <select id="compareunits"><option>mm</option><option>cm</option><option>m</option><option>in</option></select></label>
+          <label><span id="compareunitslabel">source units</span> <select id="compareunits"><option>mm</option><option>cm</option><option>m</option><option>in</option></select></label>
           <label>tolerance <input id="comparetolerance" type="number" min="0.001" step="0.001" value="0.1" aria-label="comparison tolerance in millimetres">mm</label>
         </div>
         <div id="comparestate" role="status"></div>
@@ -831,8 +841,8 @@
         </details>
         <div id="comparedisclaimer">Estimated coverage comes from sampled surfaces. It does not prove every point is within tolerance.</div>
       </div>
-      <p>STL, OBJ, GLB, PLY, PLY.GZ, STEP or B-rep. Uploads up to 48 MiB; compressed PLY expands to at most 256 MiB.</p>
-      <input id="compareref" type="file" accept=".stl,.obj,.glb,.ply,.ply.gz,.step,.stp,.brep">
+      <p>STL, OBJ, GLB, PLY, PLY.GZ, STEP, B-rep, or a PLY ZIP bundle. Select image sidecars with a PLY. Uploads total up to 48 MiB; expanded sources up to 256 MiB.</p>
+      <input id="compareref" type="file" accept=".stl,.obj,.glb,.ply,.ply.gz,.zip,.png,.jpg,.jpeg,.step,.stp,.brep" multiple>
     </section>
     <div class="pill" id="stressrow">
       <svg class="ic"><use href="#i-stress"/></svg>
@@ -1082,7 +1092,7 @@ function clearPins() {
 // `pinsPlaced` is the rebuild lifecycle; a pin shows only when both agree. ?marks=0
 // starts the toggle off, for a still that wants the part checked but pictured clean.
 let pinsWanted = q.get('marks') !== '0', pinsPlaced = true;
-function syncPins() { pins.visible = pinsWanted && pinsPlaced; }
+function syncPins() { pins.visible = pinsWanted && pinsPlaced && inspectionMode !== 'reference'; }
 
 const material = new THREE.MeshStandardMaterial({
   color: 0x9aa6b8, metalness: 0.05, roughness: 0.62, flatShading: false,
@@ -1405,6 +1415,7 @@ function componentPanel() {
   list.replaceChildren(...rows);
 }
 function inspectionApply() {
+  syncPins();
   const reference = mesh?.getObjectByName('target');
   for (const node of modelNodes()) node.visible = inspectionMode !== 'reference' && !componentHidden(node);
   ghostWanted = inspectionMode !== 'model';
@@ -2298,6 +2309,7 @@ function comparisonTransformFields(transform) {
 
 function comparePanel(entry) {
   symmetryPanel(entry);
+  importPanel(entry);
   const target = entry?.target;
   const visible = compareOpen && (!!target || compareTouched);
   const button = document.getElementById('ghostbtn');
@@ -2318,7 +2330,7 @@ function comparePanel(entry) {
   document.getElementById('comparefile').textContent = (target.file || 'Reference mesh').split(/[\\/]/).pop();
   const dimensions = Array.isArray(target.dimensions) ? `${target.dimensions.map(x => Number(x).toFixed(2)).join(' × ')} mm` : 'dimensions unavailable';
   const unit = target.unit || target.units;
-  const units = unit ? `${unit} source units${target.unit_source ? ` (${target.unit_source})` : ''}` : 'source units not supplied';
+  const units = target.import ? `${target.import.units.input} original units → mm reference` : unit ? `${unit} source units${target.unit_source ? ` (${target.unit_source})` : ''}` : 'source units not supplied';
   const alignment = target.alignment === 'stored' ? 'stored alignment'
     : target.alignment === 'auto' ? 'automatic center alignment'
       : 'original coordinates';
@@ -2355,6 +2367,11 @@ function comparePanel(entry) {
   comparisonTransformFields(preview?.transform || target.transform);
   document.getElementById('compareoverlay').checked = ghostWanted;
   const unitInput = document.getElementById('compareunits');
+  unitInput.disabled = !!target.import;
+  unitInput.title = target.import ? 'The derived reference is stored in mm. Reimport with the corrected original units to change its scale.' : '';
+  document.getElementById('compareunitslabel').textContent = target.import ? 'reference units' : 'source units';
+  const uploadUnits = document.getElementById('compareuploadunits');
+  if (uploadUnits.dataset.part !== entry.name) { uploadUnits.dataset.part = entry.name; uploadUnits.value = target.import?.units.input || unit || 'mm'; }
   if (document.activeElement !== unitInput && (target.units || target.unit)) unitInput.value = target.units || target.unit;
   const above = comparisonAbove(metrics, tolerance);
   let status = preview ? preview.reason : dirty ? waiting.reason : target.error ? target.error
@@ -2471,6 +2488,77 @@ document.getElementById('comparetolerance').onchange = event => {
   sock.send(JSON.stringify({ type: 'target_settings', name: current, tolerance_mm: tolerance }));
 };
 
+// Source filtering is a preview until explicitly saved; measurements keep using the saved reference.
+let importPreview = null;
+function importPanel(entry) {
+  if (importPreview && (importPreview.name !== entry?.name || importPreview.token !== entry?.token)) importCancel();
+  const record = entry?.target?.import;
+  document.getElementById('importdetails').hidden = !record;
+  if (!record) return;
+  if (!importPreview && entry?.target?.metrics && document.getElementById('importstatus').textContent.startsWith('Selection saved')) document.getElementById('importstatus').textContent = 'Selection saved. Comparison updated.';
+  document.getElementById('importprovenance').textContent = `${record.source.name} · ${record.units.input} → mm · ${record.components.length} component groups · ${record.excluded_components.length} excluded. ${record.texture ? 'Texture preserved: ' + record.texture.path : 'No image texture'}. Source SHA256: ${record.source.sha256}.`;
+}
+function importCancel() {
+  if (importPreview) {
+    const {root, original, owner, source} = importPreview;
+    root.removeFromParent(); referenceDispose(root, false); referenceDispose(source, true);
+    if (owner === mesh) owner.add(original); else referenceDispose(original, false);
+  }
+  importPreview = null;
+  document.getElementById('importselection').hidden = true;
+  document.getElementById('importcomponentlist').replaceChildren();
+  document.getElementById('importstatus').textContent = '';
+}
+function importVisibility() {
+  if (!importPreview) return;
+  const keep = new Set([...document.querySelectorAll('#importcomponentlist input:checked')].map(input => input.value));
+  importPreview.root.traverse(node => { if (node.name.startsWith('component-')) node.visible = keep.has(node.name); });
+  document.getElementById('importapply').disabled = !keep.size;
+  document.getElementById('importstatus').textContent = `Preview: ${keep.size} of ${importPreview.record.components.length} component groups included. Measurements still use the saved reference until you save.`;
+}
+async function importLanded(msg) {
+  if (msg.name !== current) return;
+  if (msg.error) { document.getElementById('importstatus').textContent = msg.error; return; }
+  if (msg.saved) { importCancel(); document.getElementById('importstatus').textContent = 'Selection saved. Rebuilding comparison…'; return; }
+  if (!msg.glb || msg.stamp !== parts.get(current)?.target?.stamp) return;
+  const entry = parts.get(current), owner = mesh;
+  try {
+    const bytes = Uint8Array.from(atob(msg.glb), char => char.charCodeAt(0));
+    const gltf = await loader.parseAsync(bytes.buffer, '');
+    const source = referenceSanitizeScene(gltf.scene);
+    if (owner !== mesh || msg.stamp !== parts.get(current)?.target?.stamp) { referenceDispose(source, true); return; }
+    importCancel();
+    const original = owner.getObjectByName('target');
+    if (!original) { referenceDispose(source, true); throw new Error('Wait for the reference to finish loading.'); }
+    const root = referenceInstance(source, 1);
+    root.matrix.copy(original.matrix); root.matrixAutoUpdate = false;
+    original.removeFromParent(); owner.add(root);
+    importPreview = {name:current, token:entry.token, root, original, owner, source, record:msg.import};
+    const list = document.getElementById('importcomponentlist'), excluded = new Set(entry.target.import.excluded_components);
+    for (const component of msg.import.components) {
+      const label = document.createElement('label'), input = document.createElement('input');
+      input.type = 'checkbox'; input.value = component.id; input.checked = !excluded.has(component.id);
+      input.onchange = importVisibility;
+      label.append(input, document.createTextNode(`${component.id}: ${component.triangles.toLocaleString()} triangles${component.grouped_fragments ? ' (small fragments grouped)' : ''}`)); list.append(label);
+    }
+    document.getElementById('importselection').hidden = false;
+    inspectionSetMode('reference'); importVisibility();
+  } catch (error) { document.getElementById('importstatus').textContent = `Could not preview source: ${error.message}`; }
+}
+document.getElementById('importpreview').onclick = () => {
+  if (!sock || sock.readyState !== WebSocket.OPEN) return;
+  document.getElementById('importstatus').textContent = 'Loading preserved source components…';
+  sock.send(JSON.stringify({type:'target_components',name:current,stamp:parts.get(current)?.target?.stamp,preview:true}));
+};
+document.getElementById('importcancel').onclick = importCancel;
+document.getElementById('importapply').onclick = () => {
+  if (!importPreview || !sock || sock.readyState !== WebSocket.OPEN) return;
+  const excluded = [...document.querySelectorAll('#importcomponentlist input:not(:checked)')].map(input => input.value);
+  document.getElementById('importapply').disabled = true;
+  document.getElementById('importstatus').textContent = 'Saving derived reference; original assets remain intact…';
+  sock.send(JSON.stringify({type:'target_components',name:current,stamp:parts.get(current)?.target?.stamp,excluded}));
+};
+
 const compareFile = document.getElementById('compareref');
 document.getElementById('compareadd').onclick = () => compareFile.click();
 document.getElementById('comparechange').onclick = () => compareFile.click();
@@ -2481,12 +2569,17 @@ document.getElementById('compareremove').onclick = () => {
   sock.send(JSON.stringify({ type: 'target_remove', name: current }));
 };
 compareFile.onchange = async event => {
-  const file = event.target.files?.[0];
+  const files = [...(event.target.files || [])];
+  const meshes = files.filter(file => !/\.(png|jpe?g)$/i.test(file.name));
+  const file = meshes[0];
   event.target.value = '';
   if (!file || !sock || sock.readyState !== WebSocket.OPEN || !current) return;
   const entry = parts.get(current);
-  const units = entry?.target ? document.getElementById('compareunits').value : document.getElementById('compareaddunits').value;
-  if (file.size > 48 * 1024 * 1024) {
+  const units = entry?.target ? document.getElementById('compareuploadunits').value : document.getElementById('compareaddunits').value;
+  if (meshes.length !== 1) {
+    comparePending.set(current, { error: 'Choose one mesh or ZIP bundle, plus only its image sidecars.' }); comparePanel(entry); return;
+  }
+  if (files.reduce((sum,item) => sum + item.size,0) > 48 * 1024 * 1024) {
     comparePending.set(current, { error: 'Reference file is larger than the 48 MiB viewer limit.' });
     comparePanel(entry);
     return;
@@ -2494,10 +2587,13 @@ compareFile.onchange = async event => {
   comparePending.set(current, { reason: 'Copying reference into the project…', metrics: entry?.target?.metrics });
   comparePanel(entry);
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    let binary = '';
-    for (let start = 0; start < bytes.length; start += 0x8000) binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
-    sock.send(JSON.stringify({ type: 'target_reference', name: current, filename: file.name, units, data: btoa(binary) }));
+    const encode = async asset => {
+      const bytes = new Uint8Array(await asset.arrayBuffer()); let binary = '';
+      for (let start = 0; start < bytes.length; start += 0x8000) binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
+      return {filename:asset.name,data:btoa(binary)};
+    };
+    const source = await encode(file), sidecars = await Promise.all(files.filter(item => item !== file).map(encode));
+    sock.send(JSON.stringify({ type: 'target_reference', name: current, ...source, units, sidecars }));
   } catch (error) {
     comparePending.set(current, { error: `Could not read reference: ${error.message}` });
     comparePanel(entry);
@@ -5019,6 +5115,7 @@ function connect() {
     }
     if (msg.type === 'target_symmetry') symmetryLanded(msg);
     if (msg.type === 'target_inspection') referenceInspectionLanded(msg);
+    if (msg.type === 'target_components') importLanded(msg);
     if (msg.type === 'target_alignment') datumLanded(msg);
     if (msg.type === 'feature_inspection') featureInspectionLanded(msg);
     if (msg.type === 'target_verification') verificationLanded(msg);

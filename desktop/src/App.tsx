@@ -707,10 +707,10 @@ function App() {
 
   const newFromMesh = async () => {
     try {
-      const source = await pickFolder({ title: "Choose the original mesh", directory: false, multiple: false, filters: [{ name: "STL or PLY mesh (including .ply.gz)", extensions: ["stl", "ply", "gz"] }] });
+      const source = await pickFolder({ title: "Choose the original mesh", directory: false, multiple: false, filters: [{ name: "Mesh, CAD, or textured PLY ZIP", extensions: ["stl", "obj", "glb", "ply", "gz", "zip", "step", "stp", "brep"] }] });
       if (typeof source !== "string") return;
       if (!referenceMeshSuffix(source)) {
-        setError("Choose an STL, PLY, or .ply.gz mesh reference.");
+        setError("Choose STL, OBJ, GLB, PLY, .ply.gz, STEP, BREP, or a textured PLY ZIP bundle.");
         return;
       }
       setReferenceError(null);

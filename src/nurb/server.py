@@ -178,7 +178,7 @@ def _user_traceback(exc, path):
 
 
 class Server:
-    REFERENCE_EXTENSIONS = {".stl", ".obj", ".glb", ".ply", ".ply.gz", ".step", ".stp", ".brep"}
+    REFERENCE_EXTENSIONS = {".stl", ".obj", ".glb", ".ply", ".ply.gz", ".zip", ".step", ".stp", ".brep"}
     REFERENCE_LIMIT = 48 * 1024 * 1024
 
     @staticmethod
@@ -964,6 +964,7 @@ class Server:
             "stamp": hit["stamp"],
             "offset": [round(float(transform[i]), 6) for i in (3, 7, 11)],
             "regions": declared.get("regions", []),
+            "import": hit.get("import"),
         }
         entry["target_glb"] = hit["glb"]
         if shape is not None and any("feature" in r for r in declared.get("regions", [])):
@@ -1028,10 +1029,19 @@ class Server:
                     source_glb = body
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 pass
+        from . import reference_import
+        imported_record = reference_import.manifest(path) if path.suffix.lower() == ".glb" else None
+        if source_glb is None and reference_import.is_bundle(path):
+            source_glb = reference_import.read(path, units).scene().export(file_type="glb")
+            # Bundle conversion has already normalized coordinates to millimetres.
+            display_unit = "mm"
+        else:
+            display_unit = unit
         hit = {
+            "import": imported_record,
             "mesh": mesh,
             "glb": source_glb or trimesh.Scene([mesh]).export(file_type="glb"),
-            "display_scale": scan.UNITS[unit] if source_glb is not None else 1.0,
+            "display_scale": scan.UNITS[display_unit] if source_glb is not None else 1.0,
             "content_id": hashlib.sha256(path.read_bytes() + unit.encode()).hexdigest(),
             "stamp": stamp,
             "path": path.resolve(),
@@ -1862,6 +1872,9 @@ class Server:
                 )
                 return
             try:
+                target = (self.state.get(name) or {}).get("target") or {}
+                if target.get("import") and changes.get("units", "mm") != "mm":
+                    raise ValueError("Imported references are normalized to mm; reimport with the corrected original units")
                 written = compare.update_card(path, **changes)
             except (ValueError, OSError) as exc:
                 await self.reply(
@@ -1882,6 +1895,34 @@ class Server:
                 {"type": "target_settings", "name": name, "written": written,
                  **({"regions": compare.inspection_regions(changes["regions"])} if "regions" in changes else {})},
             )
+            return
+
+        if msg.get("type") == "target_components":
+            from . import checks, compare, reference_import
+            try:
+                current_target = (self.state.get(name) or {}).get("target") or {}
+                if msg.get("stamp") != current_target.get("stamp"):
+                    raise ValueError("Reference changed; reopen the component preview")
+                declared = compare.setting(checks.settings(path))
+                imported = await asyncio.to_thread(reference_import.reopen, self.root / declared["file"])
+                if msg.get("preview"):
+                    glb = await asyncio.to_thread(lambda: imported.scene().export(file_type="glb"))
+                    await self.reply(client, {"type": "target_components", "name": name, "stamp": current_target["stamp"],
+                                              "glb": base64.b64encode(glb).decode(), "import": imported.summary()})
+                else:
+                    excluded = msg.get("excluded", [])
+                    if not isinstance(excluded, list) or not all(isinstance(i, str) for i in excluded):
+                        raise ValueError("Excluded components must be a list of component IDs")
+                    relative, _ = await asyncio.to_thread(reference_import.save, imported, self.root, excluded)
+                    # Keep the saved alignment and region definitions: filtering changes the reference, not its frame.
+                    if compare.setting(checks.settings(path)) != declared or ((self.state.get(name) or {}).get("target") or {}).get("stamp") != msg.get("stamp"):
+                        raise ValueError("Reference changed during filtering; reopen the component preview")
+                    compare.update_card(path, file=relative, units="mm")
+                    self.targets.clear()
+                    self.queue.put_nowait(str(path))
+                    await self.reply(client, {"type": "target_components", "name": name, "saved": True})
+            except (ValueError, OSError) as exc:
+                await self.reply(client, {"type": "target_components", "name": name, "error": str(exc)})
             return
 
         if msg.get("type") in ("target_reference", "target_remove"):
@@ -1909,12 +1950,40 @@ class Server:
                         raise ValueError("reference file is empty")
                     if len(body) > self.REFERENCE_LIMIT:
                         raise ValueError("reference file is larger than the 48 MiB viewer limit")
-                    self._validate_reference_source(filename, body)
+                    from . import reference_import
+                    bundled = suffix == ".zip" or (suffix in {".ply", ".ply.gz"} and reference_import.texture_name(filename, body))
+                    if not bundled:
+                        self._validate_reference_source(filename, body)
                     units = msg.get("units")
                     from .scan import UNITS
 
                     if units not in UNITS:
                         raise ValueError(f"reference units must be one of {', '.join(UNITS)}")
+                    if bundled:
+                        sidecars = {}
+                        uploaded = msg.get("sidecars", [])
+                        if not isinstance(uploaded, list) or len(uploaded) > 127 or not all(isinstance(item, dict) for item in uploaded):
+                            raise ValueError("Texture sidecars must be a list of named image files")
+                        for item in uploaded:
+                            asset_name = reference_import.safe_name(str(item.get("filename", "")))
+                            if asset_name in sidecars:
+                                raise ValueError("Duplicate texture sidecar names")
+                            try:
+                                sidecars[asset_name] = base64.b64decode(item.get("data", ""), validate=True)
+                            except (ValueError, TypeError, binascii.Error) as exc:
+                                raise ValueError("Texture sidecar is not valid base64 data") from exc
+                        if len(body) + sum(len(data) for data in sidecars.values()) > self.REFERENCE_LIMIT:
+                            raise ValueError("Reference and textures exceed the 48 MiB viewer limit; use the CLI import command")
+                        imported = await asyncio.to_thread(reference_import.read_bytes, filename, body, units, sidecars)
+                        relative_file, _ = await asyncio.to_thread(reference_import.save, imported, self.root)
+                        declared = compare.setting(checks.settings(path))
+                        tolerance = declared["tolerance_mm"] if declared else compare.DEFAULT_TOLERANCE_MM
+                        written = compare.attach_reference(path, relative_file, units="mm", tolerance_mm=tolerance)
+                        self.targets.clear()
+                        self.target_alignments = {key: value for key, value in self.target_alignments.items() if key[0] != str(path)}
+                        self.queue.put_nowait(str(path))
+                        await self.reply(client, {"type": "target_reference", "name": name, "written": written})
+                        return
                     safe = _export_name(filename[:-len(suffix)])[:48] or "mesh"
                     digest = hashlib.blake2b(body, digest_size=5).hexdigest()
                     relative = pathlib.Path("scans") / f"{name}-{safe}-{digest}{suffix}"

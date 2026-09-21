@@ -9,6 +9,8 @@ export function validReferenceTolerance(value: number): boolean {
 export type ReferenceInfo = {
   bounds: [[number, number, number], [number, number, number]];
   triangles: number;
+  texture?: string | null;
+  components?: number;
 };
 
 export type ReferenceProject = {
@@ -37,7 +39,7 @@ export function referenceFileName(source: string): string {
 }
 
 export function referenceMeshSuffix(source: string): string | null {
-  return referenceFileName(source).toLowerCase().match(/\.(stl|ply(?:\.gz)?)$/)?.[0] ?? null;
+  return referenceFileName(source).toLowerCase().match(/\.(stl|obj|glb|ply(?:\.gz)?|zip|step|stp|brep)$/)?.[0] ?? null;
 }
 
 export function referenceProjectName(source: string): string {

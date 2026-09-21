@@ -168,13 +168,7 @@ async fn create_reference_project(
                 format!("Could not create the project folder: {e}")
             }
         })?;
-        let result = (|| {
-            seed(&launcher, &dir, &part)?;
-            let copied = reference::copy_source(&dir, &PathBuf::from(source))?;
-            // Read the saved copy so a changed source cannot give the new part stale bounds.
-            let info = reference::inspect(&launcher, &copied)?;
-            reference::write_part(&dir, &module, &units, tolerance_mm, &info, &copied)
-        })();
+        let result = reference::create(&launcher, &dir, &module, &PathBuf::from(source), &units, tolerance_mm);
         if let Err(error) = result {
             let _ = std::fs::remove_dir_all(&dir);
             return Err(error);

@@ -488,7 +488,11 @@ def update_card(part_path, **changes):
     current = setting(checks.settings(path))
     if current is None:
         raise ValueError(f"{path.stem} has no target in its card")
-    allowed = {"units", "tolerance_mm", "transform", "regions"}
+    allowed = {"units", "tolerance_mm", "transform", "regions", "file"}
+    if "file" in changes:
+        file = str(changes["file"])
+        if pathlib.PurePosixPath(file).is_absolute() or pathlib.PureWindowsPath(file).drive or ".." in pathlib.PurePosixPath(file).parts or "\\" in file:
+            raise ValueError("target file must be a portable path inside the project")
     unknown = set(changes) - allowed
     if unknown:
         raise ValueError(f"unknown target setting: {', '.join(sorted(unknown))}")
@@ -501,7 +505,7 @@ def update_card(part_path, **changes):
     block, after = rest.split("```", 1)
     block = _replace_target(block, normalized, require=True)
     card.write_text(before + opening + block + "```" + after, encoding="utf-8")
-    return [name for name in ("units", "tolerance_mm", "transform", "regions") if name in changes]
+    return [name for name in ("file", "units", "tolerance_mm", "transform", "regions") if name in changes]
 
 
 def attach_reference(part_path, relative_file, units=None, tolerance_mm=DEFAULT_TOLERANCE_MM):

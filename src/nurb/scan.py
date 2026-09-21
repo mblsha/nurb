@@ -110,6 +110,13 @@ def load(path, units=None):
             f"{path.name} is a 3MF, which nurb does not read. Open it in your slicer "
             f"and export the plate as STL, then run this on that file"
         )
+    from . import reference_import
+    if path.suffix.lower() == ".zip" or (reference_suffix(path) in {".ply", ".ply.gz"} and reference_import.is_bundle(path)):
+        imported = reference_import.read(path, units)
+        mesh = imported.mesh.copy()
+        mesh.merge_vertices(merge_tex=True, merge_norm=True)
+        mesh.metadata["reference_import"] = imported.summary()
+        return mesh, imported.provenance["units"]["input"], imported.provenance["units"]["source"]
     compressed_ply = reference_suffix(path) == ".ply.gz"
     if compressed_ply:
         with path.open("rb") as source:
@@ -216,6 +223,8 @@ def structured(path, mesh, unit, source, sections=()):
         "solid_conversion": _solid_facts(path, mesh, unit, source),
         "sections": [_section_structured(cut) for cut in sections],
     }
+    if "reference_import" in mesh.metadata:
+        result["reference_import"] = mesh.metadata["reference_import"]
     result["inspection"] = inspection(path, mesh, sections)
     return result
 

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import Logo from "./Logo";
+import pillowLicense from "./licenses/PILLOW_LICENSE.txt?raw";
 import lgpl from "./licenses/OCCT_LICENSE_LGPL_21.txt?raw";
 import occtException from "./licenses/OCCT_LGPL_EXCEPTION.txt?raw";
 import uvMit from "./licenses/UV_LICENSE_MIT.txt?raw";
@@ -119,10 +120,14 @@ export default function About({
           <p>
             Also downloaded at first launch, not shipped in the app: Node.js (MIT), the
             Claude Code and Codex chat adapters and the Gemini CLI from npm under their
-            publishers' own terms, a standalone CPython (PSF), and nurb's Python dependencies, including trimesh
+            publishers' own terms, a standalone CPython (PSF), and nurb's Python dependencies, including Pillow (MIT-CMU), trimesh
             (MIT), watchdog (Apache-2.0), websockets (BSD-3-Clause), and numpy
             (BSD-3-Clause).
           </p>
+          <details>
+            <summary>Pillow license (MIT-CMU)</summary>
+            <pre>{pillowLicense}</pre>
+          </details>
         </div>
       </div>
     </div>

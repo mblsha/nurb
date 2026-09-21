@@ -12,6 +12,7 @@ type Props = {
 
 export default function ReferenceProjectDialog({ source, creating, error, onCreate, onClose }: Props) {
   const [name, setName] = useState(() => referenceProjectName(source));
+  const fixedUnits = /\.(step|stp|brep)$/i.test(source);
   const [units, setUnits] = useState<ReferenceUnit>("mm");
   const [tolerance, setTolerance] = useState("0.1");
   const [info, setInfo] = useState<ReferenceInfo | null>(null);
@@ -40,11 +41,12 @@ export default function ReferenceProjectDialog({ source, creating, error, onCrea
         <div className="about-title" id="reference-project-title">New from mesh</div>
         <div className="about-body">
           <p>Keep the original as a reference and rebuild an editable CAD model. Start with a box matching its bounds.</p>
+          <p>For a textured PLY, keep the declared PNG/JPEG beside it or choose their ZIP bundle. Source files and image hashes are preserved.</p>
           <div className="reference-file">{referenceFileName(source)}</div>
           <label className="api-key-label" htmlFor="reference-project-name">Project name</label>
           <input className="api-key-input" id="reference-project-name" value={name} onChange={(event) => setName(event.target.value)} disabled={creating} autoFocus required autoComplete="off" />
           <label className="api-key-label" htmlFor="reference-units">Original file units</label>
-          <select className="api-key-input" id="reference-units" value={units} onChange={(event) => setUnits(event.target.value as ReferenceUnit)} disabled={creating}>
+          <select className="api-key-input" id="reference-units" value={units} onChange={(event) => setUnits(event.target.value as ReferenceUnit)} disabled={creating || fixedUnits}>
             <option value="mm">Millimetres</option>
             <option value="cm">Centimetres</option>
             <option value="m">Metres</option>
@@ -53,6 +55,7 @@ export default function ReferenceProjectDialog({ source, creating, error, onCrea
           <p className="reference-size" aria-live="polite">
             {info ? `${referenceDimensions(info, units).map((size) => Number(size.toPrecision(6)).toLocaleString(undefined, { maximumSignificantDigits: 6 })).join(" × ")} mm` : readError ? "Dimensions unavailable" : "Reading mesh dimensions…"}
           </p>
+          {info?.texture && <p className="reference-hint">Texture: {info.texture}. {info.components} connected component groups. Review and exclude detached noise in Compare → Source assets and detached components after opening the project.</p>}
           <p className="reference-hint">Confirm that these dimensions match the original. Choose the units used when exporting the mesh.</p>
           <label className="api-key-label" htmlFor="reference-tolerance">Ignore differences within (mm)</label>
           <input className="api-key-input" id="reference-tolerance" type="number" min={MIN_REFERENCE_TOLERANCE_MM} step="any" value={tolerance} onChange={(event) => setTolerance(event.target.value)} disabled={creating} required />

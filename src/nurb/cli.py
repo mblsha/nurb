@@ -157,6 +157,24 @@ def _seed_agents(root, embed=False):
     return [agents, claude], None
 
 
+def cmd_import(args):
+    """Inspect a portable source bundle or write a derived reference without editing its inputs."""
+    from . import reference_import
+    try:
+        imported = reference_import.read(args.file, units=args.units)
+        result = imported.summary()
+        if not args.preview:
+            if not args.units:
+                raise ValueError("Confirm the original PLY units with --units mm, cm, m, or in before importing")
+            output, result = reference_import.save(imported, args.root or project_root(), args.exclude_component)
+            result["file"] = output
+        elif args.exclude_component:
+            result["selected_bounds_mm"] = imported.scene(args.exclude_component).bounds.tolist()
+        print(json.dumps(result, indent=2, allow_nan=False))
+    except (ValueError, OSError) as exc:
+        sys.exit(f"  {exc}")
+
+
 def cmd_new(args):
     # The desktop app creates projects under one shared directory, which may itself
     # already be a nurb project. Its explicit root keeps this seed inside the new
@@ -168,14 +186,22 @@ def cmd_new(args):
     )
     reference = getattr(args, "reference", None)
     reference_data = None
+    imported = None
     if reference:
         import shutil
 
-        from . import compare, scan
+        from . import compare, scan, reference_import
 
         source = pathlib.Path(reference).resolve()
         try:
-            mesh, unit, unit_source = scan.load(source, units=args.units)
+            if reference_import.is_bundle(source):
+                imported = reference_import.read(source, units=args.units)
+                mesh = imported.scene(getattr(args, "exclude_component", [])).to_mesh()
+                unit, unit_source = imported.provenance["units"]["input"], imported.provenance["units"]["source"]
+            else:
+                if getattr(args, "exclude_component", []):
+                    raise ValueError("Component exclusion is supported for PLY bundles; inspect with nurb import first")
+                mesh, unit, unit_source = scan.load(source, units=args.units)
         except (ValueError, OSError) as exc:
             sys.exit(f"  {exc}")
         if unit_source == "guess":
@@ -219,7 +245,10 @@ def cmd_new(args):
         source, mesh, target, shutil = reference_data
         destination = root / target["file"]
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.resolve() != source:
+        if imported:
+            target["file"], _ = reference_import.save(imported, root, getattr(args, "exclude_component", []))
+            target["units"] = "mm"
+        elif destination.resolve() != source:
             shutil.copy2(source, destination)
         center = mesh.bounds.mean(axis=0)
         # A sheet or open scan can have no span on one axis. The reference keeps its
@@ -1704,15 +1733,24 @@ def main(argv=None):
     s = sub.add_parser("new", help="create a part")
     s.add_argument("name")
     s.add_argument("--root", help=argparse.SUPPRESS)
-    s.add_argument("--from", dest="reference", metavar="MESH", help="start a reconstruction from this STL, OBJ, GLB, or triangulated PLY/PLY.GZ reference")
+    s.add_argument("--from", dest="reference", metavar="MESH", help="start a reconstruction from this STL, OBJ, GLB, or triangulated PLY/PLY.GZ or textured PLY ZIP reference")
     s.add_argument("--units", choices=("mm", "cm", "m", "in"), help="the reference file's confirmed units")
     s.add_argument("--tolerance", type=float, help="acceptable surface deviation in mm (default 0.1)")
+    s.add_argument("--exclude-component", action="append", default=[], help="explicit component ID from nurb import --preview; original assets stay intact")
     s.add_argument(
         "--embed",
         action="store_true",
         help="seed AGENTS.md for an embedding app that owns the server and permissions",
     )
     s.set_defaults(fn=cmd_new)
+
+    s = sub.add_parser("import", help="inspect or import a PLY with texture sidecars or a PLY ZIP bundle")
+    s.add_argument("file")
+    s.add_argument("--units", choices=("mm", "cm", "m", "in"))
+    s.add_argument("--root", help="destination project directory")
+    s.add_argument("--preview", action="store_true", help="report source provenance and component IDs without writing")
+    s.add_argument("--exclude-component", action="append", default=[])
+    s.set_defaults(fn=cmd_import)
 
     s = sub.add_parser("dev", help="watch parts and serve the viewer")
     s.add_argument("--port", type=int, help=f"default: the first free port from {DEFAULT_PORT}")

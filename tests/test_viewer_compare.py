@@ -322,7 +322,7 @@ def test_compare_is_discoverable_without_a_reference_and_labels_coverage_as_esti
     assert 'id="compareremove"' in VIEWER
     assert "estimated within" in VIEWER
     assert "Apply alignment" in VIEWER
-    assert 'accept=".stl,.obj,.glb,.ply,.ply.gz,.step,.stp,.brep"' in VIEWER
+    assert 'accept=".stl,.obj,.glb,.ply,.ply.gz,.zip,.png,.jpg,.jpeg,.step,.stp,.brep" multiple' in VIEWER
     assert ".3mf" not in VIEWER.split('id="compareref"', 1)[1].split(">", 1)[0]
 
 
@@ -401,3 +401,22 @@ assert.equal(closed, 1);
 assert.equal(ghostGeo.size, 0);
 """
     )
+
+
+def test_reference_mode_hides_cad_finding_highlights():
+    sync = function("function syncPins()", "const material =")
+    run_js("import assert from 'node:assert/strict'; let inspectionMode='reference'; const pins={}; let pinsWanted=true,pinsPlaced=true;\n" + sync + "\nsyncPins();assert.equal(pins.visible,false);inspectionMode='overlay';syncPins();assert.equal(pins.visible,true);")
+
+
+def test_import_component_preview_hides_only_the_unchecked_source_groups():
+    visibility = function("function importVisibility()", "async function importLanded(")
+    run_js(f"import * as THREE from {json.dumps(THREE)};\n" + "import assert from 'node:assert/strict';\n" + """
+const root=new THREE.Group(), first=new THREE.Mesh(), second=new THREE.Mesh();
+first.name='component-1';second.name='component-2';root.add(first,second);
+let importPreview={root,record:{components:[{},{}]}};
+const apply={},status={};
+const document={querySelectorAll:()=>[{value:'component-1'}],getElementById:id=>id==='importapply'?apply:status};
+""" + visibility + """
+importVisibility();assert.equal(first.visible,true);assert.equal(second.visible,false);
+assert.equal(apply.disabled,false);assert.match(status.textContent,/saved reference until you save/);
+""")
