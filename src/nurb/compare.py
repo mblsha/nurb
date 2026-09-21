@@ -207,7 +207,17 @@ def centered_transform(part, mesh):
     return matrix.reshape(-1).tolist()
 
 
-def against(shape, mesh, tolerance_mm=DEFAULT_TOLERANCE_MM, transform=None, regions=None):
+def against(
+    shape,
+    mesh,
+    tolerance_mm=DEFAULT_TOLERANCE_MM,
+    transform=None,
+    regions=None,
+    *,
+    part_mesh=None,
+    component_meshes=None,
+    provenance=None,
+):
     """Return bidirectional deviation, tolerance coverage, and spatial samples.
 
     The random area samples provide unbiased coverage and percentile estimates. Vertices and the centroids of small faces are added to the sampled maximum, then nearest points found from the opposite direction are folded back into each side. That refinement makes a small pocket visible even when its footprint is too small for a random sample to land inside.
@@ -215,7 +225,12 @@ def against(shape, mesh, tolerance_mm=DEFAULT_TOLERANCE_MM, transform=None, regi
     tolerance_mm = float(tolerance_mm)
     if not np.isfinite(tolerance_mm) or tolerance_mm < MIN_TOLERANCE_MM:
         raise ValueError(f"comparison tolerance must be at least {MIN_TOLERANCE_MM:g} mm")
-    part = _part_mesh(shape, tolerance_mm)
+    # The CLI leaves this unset and gets the deliberately fine absolute OCCT
+    # tessellation below. The dev server already has a transformed scene mesh for
+    # the browser, so it can pass that here without asking OCCT to mesh an assembly
+    # compound a second time. Some compounds make that second pass pathologically
+    # slow and starve the server's event loop even from a worker thread.
+    part = _part_mesh(shape, tolerance_mm) if part_mesh is None else part_mesh
     if not len(part.faces):
         raise ValueError("the part has no surface to compare")
     matrix = _transform(transform) if transform is not None else np.asarray(centered_transform(part, mesh)).reshape(4, 4)
@@ -271,9 +286,21 @@ def against(shape, mesh, tolerance_mm=DEFAULT_TOLERANCE_MM, transform=None, regi
             "target_feature_and_refinement": len(target_all_points) - target_stat_count,
         },
     }
+    if provenance is not None:
+        result["provenance"] = provenance
     if regions:
         result["inspection_regions"] = [
-            _inspect_region(shape, part, moved, part_surface, target_surface, region, tolerance_mm)
+            _inspect_region(
+                shape,
+                part,
+                moved,
+                part_surface,
+                target_surface,
+                region,
+                tolerance_mm,
+                component_meshes=component_meshes,
+                provenance=provenance,
+            )
             for region in inspection_regions(regions)
         ]
     return result
@@ -295,8 +322,21 @@ def _clip_region(mesh, bounds):
     return trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
 
-def _inspect_region(shape, part, target, part_surface, target_surface, region, tolerance):
+def _inspect_region(
+    shape,
+    part,
+    target,
+    part_surface,
+    target_surface,
+    region,
+    tolerance,
+    *,
+    component_meshes=None,
+    provenance=None,
+):
     result = {"name": region["name"], "selector": region, "frame": "part_mm"}
+    if provenance is not None:
+        result["provenance"] = provenance
     bounds = region.get("bounds_mm")
     selected = part
     if "component" in region:
@@ -304,7 +344,16 @@ def _inspect_region(shape, part, target, part_surface, target_surface, region, t
         matches = [c for c in components if region["component"] in (getattr(c, "id", None), getattr(c, "label", None))]
         if len(matches) != 1:
             return {**result, "status": "unresolved", "error": "choose a unique component ID or label from this assembly"}
-        selected = _part_mesh(matches[0].solid, tolerance)
+        if component_meshes is None:
+            selected = _part_mesh(matches[0].solid, tolerance)
+        else:
+            selected = component_meshes.get(matches[0].id)
+            if selected is None:
+                return {
+                    **result,
+                    "status": "unresolved",
+                    "error": "the built display mesh has no geometry for this component",
+                }
         if not len(selected.faces):
             return {**result, "status": "empty", "error": "the component has no surface"}
         bounds = {"min": selected.bounds[0].tolist(), "max": selected.bounds[1].tolist()}

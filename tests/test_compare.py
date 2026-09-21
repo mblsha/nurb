@@ -192,14 +192,84 @@ def test_rebuild_attaches_the_cards_target(tmp_path):
     assert "target_glb" not in server._meta(entry)
 
 
-def test_check_adds_the_deviation_and_reuses_the_loaded_mesh(tmp_path):
+def test_check_adds_the_deviation_and_reuses_the_loaded_mesh(tmp_path, monkeypatch):
     server = project(tmp_path)
     server.rebuild(tmp_path / "parts" / "thing.py")
     held = server.targets[("scans/original.stl", None)]
+    monkeypatch.setattr(
+        compare,
+        "_part_mesh",
+        lambda *_: pytest.fail("the server comparison remeshed the CAD shape"),
+    )
     entry = server.check(tmp_path / "parts" / "thing.py")
     assert entry["target"]["metrics"]["part"]["max"] < 0.05
     assert entry["target"]["metrics"]["target"]["max"] < 0.05
+    assert entry["target"]["metrics"]["provenance"]["method"] == "Display mesh estimate"
     assert server.targets[("scans/original.stl", None)] is held
+
+
+def test_display_mesh_comparison_applies_node_transforms_and_reuses_component_meshes(
+    tmp_path, monkeypatch
+):
+    scene = trimesh.Scene()
+    transform = trimesh.transformations.translation_matrix([25.0, -10.0, 7.0])
+    scene.add_geometry(
+        trimesh.creation.box(extents=[2.0, 4.0, 6.0]),
+        node_name="shifted-node",
+        geom_name="shifted-node",
+        transform=transform,
+    )
+    entry = {
+        "glb": scene.export(file_type="glb"),
+        "bbox": [2.0, 4.0, 6.0],
+        "components": [
+            {
+                "id": "shifted_1",
+                "label": "Shifted",
+                "role": "part",
+                "node": "shifted-node",
+            }
+        ],
+    }
+    whole, components = Server(tmp_path)._comparison_meshes(entry)
+    assert whole.bounds.mean(axis=0) == pytest.approx([25.0, -10.0, 7.0])
+    assert components["shifted_1"].bounds == pytest.approx(whole.bounds)
+
+    shape = Box(2, 4, 6)
+    shape._nurb_scene = SimpleNamespace(
+        components=[
+            SimpleNamespace(id="shifted_1", label="Shifted", solid=shape)
+        ]
+    )
+    target = trimesh.creation.box(extents=[2.0, 4.0, 6.0])
+    target.apply_transform(transform)
+    monkeypatch.setattr(
+        compare,
+        "_part_mesh",
+        lambda *_: pytest.fail("the display comparison remeshed a component"),
+    )
+    metrics = compare.against(
+        shape,
+        target,
+        transform=compare.IDENTITY,
+        regions=[{"name": "shifted", "component": "shifted_1"}],
+        part_mesh=whole,
+        component_meshes=components,
+        provenance={"method": "Display mesh estimate"},
+    )
+    assert metrics["part"]["max"] < 1e-6
+    assert metrics["target"]["max"] < 1e-6
+    assert metrics["inspection_regions"][0]["status"] == "measured"
+    assert metrics["inspection_regions"][0]["provenance"]["method"] == "Display mesh estimate"
+
+
+def test_display_mesh_comparison_rejects_a_unit_or_transform_mismatch(tmp_path):
+    scene = trimesh.Scene()
+    scene.add_geometry(trimesh.creation.box(extents=[2.0, 4.0, 6.0]))
+    with pytest.raises(ValueError, match="does not match the CAD bounds in millimetres"):
+        Server(tmp_path)._comparison_meshes(
+            {"glb": scene.export(file_type="glb"), "bbox": [2000.0, 4000.0, 6000.0]}
+        )
 
 
 def test_legacy_auto_alignment_does_not_move_after_a_part_edit(tmp_path):

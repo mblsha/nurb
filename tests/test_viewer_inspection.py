@@ -25,7 +25,7 @@ def js(functions, checks):
 
 
 def test_section_closes_solids_in_part_coordinates_and_preserves_nested_holes():
-    js([("function sectionContours(", "function sectionDifference(")], """
+    js([("function sectionSegments(", "function sectionDifference(")], """
 const identity = new THREE.Matrix4();
 const square = new THREE.Shape(); square.moveTo(-5,-5); square.lineTo(5,-5);
 square.lineTo(5,5); square.lineTo(-5,5); square.closePath();
@@ -46,7 +46,7 @@ assert.equal(sectionContours(islands, identity, 1, .317).valid, true);
 
 
 def test_section_refuses_open_meshes_and_coplanar_boundaries_instead_of_filling_them():
-    js([("function sectionContours(", "function sectionDifference(")], """
+    js([("function sectionSegments(", "function sectionDifference(")], """
 const geometry = new THREE.BufferGeometry();
 geometry.setAttribute('position', new THREE.Float32BufferAttribute([-1,0,-1, 1,0,1, 0,2,-1],3));
 const open = sectionContours(geometry, new THREE.Matrix4(), 2, 0);

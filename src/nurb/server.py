@@ -653,6 +653,69 @@ class Server:
                 return variant_ctx
         return ctx
 
+    @staticmethod
+    def _comparison_meshes(entry):
+        """Read the browser GLB in its displayed millimetre frame.
+
+        The GLB stores assembly leaves separately so the viewer can pick them. Apply
+        every graph transform before concatenating them, and retain the same leaves
+        for named inspection regions. Trimesh reports glTF's nominal metre unit but
+        does not rescale the raw coordinates; nurb writes those coordinates in mm.
+        The bounds check catches either an accidental unit conversion or a missed
+        node transform before it can produce plausible-looking wrong measurements.
+        """
+        import numpy as np
+        import trimesh
+
+        body = entry.get("glb")
+        if not body:
+            raise ValueError("the built display mesh is unavailable; rebuild the CAD model")
+        try:
+            scene = trimesh.load(
+                io.BytesIO(body),
+                file_type="glb",
+                force="scene",
+                process=False,
+            )
+        except Exception as exc:
+            raise ValueError(f"the built display mesh could not be read: {exc}") from exc
+
+        transformed = {}
+        for node in scene.graph.nodes_geometry:
+            matrix, geometry_name = scene.graph.get(node)
+            geometry = scene.geometry.get(geometry_name)
+            if not hasattr(geometry, "faces") or not len(geometry.faces):
+                continue
+            placed = geometry.copy()
+            placed.apply_transform(matrix)
+            transformed[node] = placed
+        if not transformed:
+            raise ValueError("the built display mesh has no triangles to compare")
+
+        components = {}
+        for component in entry.get("components", ()):
+            if component.get("group"):
+                continue
+            node = component.get("node")
+            if node not in transformed:
+                identity = component.get("id") or component.get("label") or node
+                raise ValueError(
+                    f"the built display mesh has no geometry for component {identity!r}"
+                )
+            components[component["id"]] = transformed[node]
+
+        whole = trimesh.util.concatenate(tuple(transformed.values()))
+        expected = entry.get("bbox")
+        if expected is not None and len(expected) == 3:
+            actual = np.asarray(whole.extents, dtype=float)
+            if not np.isfinite(actual).all() or not np.allclose(
+                actual, np.asarray(expected, dtype=float), rtol=1e-4, atol=0.02
+            ):
+                raise ValueError(
+                    "the built display mesh does not match the CAD bounds in millimetres; rebuild the model"
+                )
+        return whole, components
+
     def check(self, path, stop=None):
         """Run the rules on the last good build.
 
@@ -726,12 +789,19 @@ class Server:
 
             try:
                 hit = self._target_mesh(target["file"], target.get("units"))
+                part_mesh, component_meshes = self._comparison_meshes(entry)
                 metrics = compare.against(
                     entry["shape"],
                     hit["mesh"],
                     tolerance_mm=target["tolerance_mm"],
                     transform=target["transform"],
                     regions=target.get("regions"),
+                    part_mesh=part_mesh,
+                    component_meshes=component_meshes,
+                    provenance={
+                        "method": "Display mesh estimate",
+                        "detail": "CAD distances use the cached viewer tessellation with scene transforms applied; `nurb compare` uses a finer absolute tessellation.",
+                    },
                 )
                 # The ghost draws with the transform the numbers used, never a stale one.
                 target["transform"] = metrics.pop("transform")
