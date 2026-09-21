@@ -1027,7 +1027,7 @@ const edgeMaterial = new THREE.LineBasicMaterial({
 // surface, and never writing depth so the part always reads through it. Hidden in
 // headless stills: ?view= is a render's signature, and a still is of the part.
 let ghostWanted = !view;
-const ghostGeo = new Map();  // part -> { stamp, geometry }, so a save never refetches a big scan
+const ghostGeo = new Map();  // part -> { stamp, scene }, so a save never refetches a big scan
 let compareOpen = !view, compareTouched = false, compareMap = 'part', comparePainted = null;
 let compareScale = Number(localStorage.getItem('nurb.compare.scale')) || 1;
 let compareAuto = false, compareThrough = true;
@@ -1039,6 +1039,143 @@ const ghostMaterial = new THREE.MeshStandardMaterial({
   color: 0xd9a066, metalness: 0.0, roughness: 0.9,
   transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide,
 });
+
+function referenceUsesSourceMaterial(mode) {
+  return mode === 'reference' || mode === 'side-by-side';
+}
+
+function referenceMaterialList(material) {
+  return Array.isArray(material) ? material : [material];
+}
+
+function referenceMaterialShape(source, make) {
+  const materials = referenceMaterialList(source).map(make);
+  return Array.isArray(source) ? materials : materials[0];
+}
+
+function referenceMeshes(root) {
+  const found = [];
+  root?.traverse(node => { if (node.isMesh) found.push(node); });
+  return found;
+}
+
+function referenceResources(root, cache) {
+  const geometries = new Set(), materials = new Set(), textures = new Set(), images = new Set();
+  root?.traverse(node => {
+    if (cache && node.geometry) geometries.add(node.geometry);
+    const owned = cache
+      ? referenceMaterialList(node.material)
+      : [...referenceMaterialList(node.userData.referenceSourceMaterial),
+        ...referenceMaterialList(node.userData.referenceAnalysisMaterial)];
+    for (const material of owned.filter(Boolean)) {
+      materials.add(material);
+      if (cache) for (const value of Object.values(material)) if (value?.isTexture) {
+        textures.add(value);
+        const image = value.source?.data;
+        if (image && typeof image.close === 'function') images.add(image);
+      }
+    }
+  });
+  return {geometries, materials, textures, images};
+}
+
+function referenceDispose(root, cache, preserve = null) {
+  const resources = referenceResources(root, cache);
+  const kept = preserve ? referenceResources(preserve, true) : null;
+  for (const kind of ['geometries','materials','textures','images']) if (kept)
+    for (const item of kept[kind]) resources[kind].delete(item);
+  const {geometries, materials, textures, images} = resources;
+  for (const geometry of geometries) geometry.dispose();
+  for (const material of materials) material.dispose();
+  for (const texture of textures) texture.dispose();
+  for (const image of images) image.close();
+}
+
+function referenceSanitizeScene(scene) {
+  const keep = new Set([scene]);
+  const include = node => { for (let here = node; here; here = here.parent) keep.add(here); };
+  for (const node of referenceMeshes(scene)) {
+    include(node);
+    if (node.isSkinnedMesh) for (const bone of node.skeleton?.bones || []) include(bone);
+  }
+  const discarded = new THREE.Group();
+  const nodes = [];
+  scene.traverse(node => nodes.push(node));
+  for (const node of nodes.reverse()) if (node !== scene && !keep.has(node) && node.parent && keep.has(node.parent)) {
+    node.parent.remove(node); discarded.add(node);
+  }
+  // A camera or light is occasionally used as a transform parent. Preserve that
+  // transform without importing its rendering behavior into the comparison scene.
+  for (const node of nodes) if (node.parent && (node.isCamera || node.isLight || node.isLine || node.isPoints)) {
+    const parent = node.parent, replacement = new THREE.Group().copy(node, false);
+    for (const child of [...node.children]) replacement.add(child);
+    parent.add(replacement); parent.remove(node); discarded.add(node);
+  }
+  referenceDispose(discarded, true, scene);
+  return scene;
+}
+
+function referenceCloneScene(scene) {
+  const cloned = scene.clone(true), copies = new Map();
+  const pair = (source, target) => {
+    copies.set(source, target);
+    for (let i = 0; i < source.children.length; i++) pair(source.children[i], target.children[i]);
+  };
+  pair(scene, cloned);
+  scene.traverse(source => {
+    if (!source.isSkinnedMesh || !source.skeleton) return;
+    const target = copies.get(source);
+    const bones = source.skeleton.bones.map(bone => copies.get(bone)).filter(Boolean);
+    if (bones.length !== source.skeleton.bones.length) return;
+    target.skeleton = new THREE.Skeleton(bones, source.skeleton.boneInverses.map(matrix => matrix.clone()));
+    target.bindMode = source.bindMode;
+    target.bindMatrix.copy(source.bindMatrix);
+    target.bindMatrixInverse.copy(source.bindMatrixInverse);
+  });
+  return cloned;
+}
+
+function referenceInstance(scene, displayScale) {
+  const root = new THREE.Group(), content = referenceCloneScene(scene);
+  root.name = 'target';
+  content.scale.multiplyScalar(Number.isFinite(displayScale) && displayScale > 0 ? displayScale : 1);
+  root.add(content);
+  for (const node of referenceMeshes(root)) {
+    if (!node.geometry.attributes.normal) node.geometry.computeVertexNormals();
+    node.userData.nurbReference = true;
+    node.userData.referenceSourceMaterial = referenceMaterialShape(node.material, source => {
+      const cloned = source.clone();
+      cloned.side = THREE.DoubleSide;
+      cloned.clippingPlanes = [plane];
+      cloned.needsUpdate = true;
+      return cloned;
+    });
+    node.userData.referenceAnalysisMaterial = referenceMaterialShape(node.material, () => {
+      const cloned = ghostMaterial.clone();
+      cloned.clippingPlanes = [plane];
+      return cloned;
+    });
+  }
+  return root;
+}
+
+function referenceSetMode(root, mode) {
+  const source = referenceUsesSourceMaterial(mode);
+  for (const node of referenceMeshes(root)) node.material = source
+    ? node.userData.referenceSourceMaterial : node.userData.referenceAnalysisMaterial;
+}
+
+function modelGeometryDispose(root) {
+  root?.traverse(node => {
+    if ((node.isMesh || node.isLineSegments) && !node.userData.nurbReference) node.geometry.dispose();
+  });
+}
+
+function displayedMeshDispose(root) {
+  const reference = root?.getObjectByName('target');
+  if (reference) referenceDispose(reference, false);
+  modelGeometryDispose(root);
+}
 
 async function ghostAttach(name, entry) {
   const t = entry.target;
@@ -1052,21 +1189,19 @@ async function ghostAttach(name, entry) {
     // entry mid-fetch. The next paint fetches again.
     try { gltf = await loader.loadAsync(`/glb/${name}.target.glb?v=${t.stamp}`); }
     catch (e) { return; }
-    let geometry = null;
-    gltf.scene.traverse(o => { if (o.isMesh && !geometry) geometry = o.geometry; });
-    if (!geometry) return;
-    if (!geometry.attributes.normal) geometry.computeVertexNormals();
+    const source = referenceSanitizeScene(gltf.scene);
+    if (!referenceMeshes(source).length) return;
     if (current !== name || mesh !== group || parts.get(name)?.target?.stamp !== t.stamp) {
-      geometry.dispose();
+      referenceDispose(source, true);
       return;
     }
     const latest = ghostGeo.get(name);
     if (latest?.stamp === t.stamp) {
-      if (latest.geometry !== geometry) geometry.dispose();
+      if (latest.scene !== source) referenceDispose(source, true);
       rec = latest;
     } else {
-      rec = { stamp: t.stamp, geometry };
-      retired = latest?.geometry;
+      rec = { stamp: t.stamp, scene: source };
+      retired = latest?.scene;
       ghostGeo.set(name, rec);
     }
   }
@@ -1074,11 +1209,10 @@ async function ghostAttach(name, entry) {
   // attach only to the exact group that asked for this ghost, and never twice.
   if (current !== name || mesh !== group || parts.get(name)?.target?.stamp !== t.stamp) return;
   const stale = group.getObjectByName('target');
-  if (stale) { group.remove(stale); stale.material.dispose(); }
-  if (retired && retired !== rec.geometry) retired.dispose();
-  const g = new THREE.Mesh(rec.geometry, ghostMaterial.clone());
-  g.material.clippingPlanes = [plane];
-  g.name = 'target';
+  if (stale) { group.remove(stale); referenceDispose(stale, false); }
+  if (retired && retired !== rec.scene) referenceDispose(retired, true);
+  const g = referenceInstance(rec.scene, t.display_scale);
+  referenceSetMode(g, inspectionMode);
   const shownTransform = comparePreview.get(name)?.transform || t.transform;
   if (Array.isArray(shownTransform) && shownTransform.length === 16) {
     g.matrixAutoUpdate = false;
@@ -1108,7 +1242,7 @@ function componentInfo(node) {
 }
 function modelNodes() {
   const nodes = [];
-  mesh?.traverse(node => { if (node.isMesh && node.name !== 'target') nodes.push(node); });
+  mesh?.traverse(node => { if (node.isMesh && !node.userData.nurbReference) nodes.push(node); });
   return nodes;
 }
 function inspectionSave() {
@@ -1198,8 +1332,7 @@ function inspectionApply() {
   ghostWanted = inspectionMode !== 'model';
   if (reference) {
     reference.visible = ghostWanted;
-    reference.material.opacity = ['reference', 'side-by-side'].includes(inspectionMode) ? 1 : .35;
-    reference.material.depthWrite = ['reference', 'side-by-side'].includes(inspectionMode);
+    referenceSetMode(reference, inspectionMode);
   }
   compareMarks.visible = inspectionMode === 'deviation';
   document.getElementById('comparemode').value = inspectionMode;
@@ -1240,7 +1373,7 @@ function inspectionRender() {
   renderer.setScissorTest(false); renderer.setViewport(0, 0, width, height); renderer.clear();
   const visibility = modelNodes().map(node => [node, node.visible]);
   const reference = mesh?.getObjectByName('target');
-  const syncWriters = () => { for (const writer of writers) writer.visible = cutting && !!writer.userData.source?.visible; };
+  const syncWriters = () => { for (const writer of writers) writer.visible = cutting && writerSourceVisible(writer.userData.source); };
   if (!split) { syncWriters(); renderer.render(scene, camera); return; }
   renderer.setScissorTest(true);
   renderer.setViewport(0, 0, width / 2, height); renderer.setScissor(0, 0, width / 2, height);
@@ -1260,9 +1393,9 @@ function inspectionRender() {
 // Triangle intersections remain in the part's coordinates. A degree-two graph is
 // required before filling: open scans, touching branches and coplanar faces cannot
 // establish inside versus outside. Even-odd filling preserves nested holes/islands.
-function sectionContours(geometry, matrix, axis, at, epsilon = 1e-5) {
+function sectionSegments(geometry, matrix, axis, at, epsilon = 1e-5) {
   const positions = geometry.attributes.position, indices = geometry.index;
-  const axes = [0,1,2].filter(value => value !== axis), segments = [], points = new Map(), edges = new Set();
+  const axes = [0,1,2].filter(value => value !== axis), segments = [];
   let ambiguous = false;
   const vertex = index => new THREE.Vector3().fromBufferAttribute(positions, index).applyMatrix4(matrix).toArray();
   const count = indices ? indices.count : positions.count;
@@ -1282,11 +1415,20 @@ function sectionContours(geometry, matrix, axis, at, epsilon = 1e-5) {
     }
     const unique = [...new Map(hits.map(point => [key(point), point])).values()];
     if (unique.length !== 2) continue;
-    const ids = unique.map(key), edge = [...ids].sort().join('|');
+    segments.push(unique);
+  }
+  return {segments, ambiguous};
+}
+
+function sectionAssemble(segments, ambiguous = false, epsilon = 1e-5) {
+  const points = new Map(), edges = new Set();
+  const key = point => point.map(value => Math.round(value / epsilon)).join(',');
+  for (const segment of segments) {
+    const ids = segment.map(key), edge = [...ids].sort().join('|');
     if (edges.has(edge)) { ambiguous = true; continue; }
-    edges.add(edge); segments.push(unique);
+    edges.add(edge);
     for (let i = 0; i < 2; i++) {
-      if (!points.has(ids[i])) points.set(ids[i], {point: unique[i], adjacent: []});
+      if (!points.has(ids[i])) points.set(ids[i], {point: segment[i], adjacent: []});
       points.get(ids[i]).adjacent.push(ids[1-i]);
     }
   }
@@ -1309,6 +1451,18 @@ function sectionContours(geometry, matrix, axis, at, epsilon = 1e-5) {
     if (cross(a,b,c)*cross(a,b,d) < -(epsilon ** 2) && cross(c,d,a)*cross(c,d,b) < -(epsilon ** 2)) { ambiguous = true; break; }
   }
   return {loops, segments, valid: !open && !ambiguous, reason: ambiguous ? 'ambiguous or coplanar contours' : open ? 'open contours' : null};
+}
+
+function sectionContours(geometry, matrix, axis, at, epsilon = 1e-5) {
+  const cut = sectionSegments(geometry, matrix, axis, at, epsilon);
+  return sectionAssemble(cut.segments, cut.ambiguous, epsilon);
+}
+
+function sectionContoursMany(nodes, matrixFor, axis, at, epsilon = 1e-5) {
+  // GLTF splits one closed surface into primitives at material boundaries. Join
+  // their cut segments before judging degree two, or every such seam looks open.
+  const cuts = nodes.map(node => sectionSegments(node.geometry, matrixFor(node), axis, at, epsilon));
+  return sectionAssemble(cuts.flatMap(cut => cut.segments), cuts.some(cut => cut.ambiguous), epsilon);
 }
 // Separable squared Euclidean distance transform. Work stays linear in the image
 // size even when a large tolerance spans hundreds of pixels.
@@ -1369,7 +1523,10 @@ function sectionDifference() {
   const inverse = mesh.matrixWorld.clone().invert();
   const cad = modelNodes().filter(node => node.visible && componentInfo(node).role !== 'context');
   const gather = node => sectionContours(node.geometry, new THREE.Matrix4().multiplyMatrices(inverse, node.matrixWorld), axis, at);
-  const sides = [cad.map(gather), [gather(reference)]];
+  const referenceNodes = referenceMeshes(reference);
+  const referenceContours = sectionContoursMany(referenceNodes,
+    node => new THREE.Matrix4().multiplyMatrices(inverse, node.matrixWorld), axis, at);
+  const sides = [cad.map(gather), [referenceContours]];
   const all = sides.flat(), segments = all.flatMap(result => result.segments);
   const width = Math.max(1, Math.round(main.clientWidth / 2)), height = Math.max(1, main.clientHeight);
   sectionCanvas.width = width; sectionCanvas.height = height;
@@ -2459,7 +2616,8 @@ function sectionAttach(reaim) {
   writers = [];
   if (!mesh) return;
   mesh.updateMatrixWorld(true);
-  for (const child of [...modelNodes(), mesh.getObjectByName('target')].filter(Boolean)) {
+  const reference = mesh.getObjectByName('target');
+  for (const child of [...modelNodes(), ...referenceMeshes(reference)]) {
     if (!child.isMesh || componentInfo(child).role === 'context') continue;  // never cap the scenery
     for (const mat of [stencilBack, stencilFront]) {
       const w = new THREE.Mesh(child.geometry, mat);
@@ -2477,15 +2635,21 @@ function sectionAttach(reaim) {
   sectionUpdate();
 }
 
+function writerSourceVisible(source) {
+  for (let node = source; node; node = node.parent) if (!node.visible) return false;
+  return true;
+}
+
 function sectionUpdate() {
   const on = cutting && !!mesh;
   cap.visible = on;
-  for (const w of writers) w.visible = on && !!w.userData.source?.visible;
+  for (const w of writers) w.visible = on && writerSourceVisible(w.userData.source);
   if (!on) { plane.constant = PARKED; return; }
   // The group has no geometry of its own, and 'context' scenery must not stretch the
   // cut range: the slider spans the printed parts, in world space, joints included.
   const box = new THREE.Box3();
-  for (const c of [...modelNodes(), mesh.getObjectByName('target')].filter(Boolean)) if (c.isMesh && componentInfo(c).role !== 'context') box.expandByObject(c);
+  const reference = mesh.getObjectByName('target');
+  for (const c of [...modelNodes(), ...referenceMeshes(reference)]) if (componentInfo(c).role !== 'context') box.expandByObject(c);
   if (box.isEmpty()) { plane.constant = PARKED; return; }
   const lo = box.min[cutAxis], hi = box.max[cutAxis];
   // The cut faces the camera as it stood when the section opened or the axis was
@@ -3366,7 +3530,7 @@ async function referencePaint(name, entry, keepCamera) {
   if (!mesh || framed !== name) {
     if (mesh) {
       scene.remove(mesh);
-      mesh.traverse(o => { if ((o.isMesh || o.isLineSegments) && o.name !== 'target') o.geometry.dispose(); });
+      displayedMeshDispose(mesh);
     }
     mesh = new THREE.Group();
     mesh.userData.referenceOnly = true;
@@ -3438,7 +3602,7 @@ async function paint(name, { keepCamera }) {
     // words for this exact part, so clear the scene and let it say them.
     if (mesh) {
       scene.remove(mesh);
-      mesh.traverse(o => { if ((o.isMesh || o.isLineSegments) && o.name !== 'target') o.geometry.dispose(); });
+      displayedMeshDispose(mesh);
       mesh = null;
     }
     await referencePaint(name, entry, keepCamera);
@@ -3451,7 +3615,7 @@ async function paint(name, { keepCamera }) {
 
   // The ghost's geometry survives: it is cached per part, and a save should not
   // push a quarter-million-triangle scan back to the GPU.
-  if (mesh) { scene.remove(mesh); mesh.traverse(o => { if ((o.isMesh || o.isLineSegments) && o.name !== 'target') o.geometry.dispose(); }); }
+  if (mesh) { scene.remove(mesh); displayedMeshDispose(mesh); }
   // Always a group, even for one blob: a part is a group of one, an assembly is a
   // group whose named children the joints move, and nothing downstream branches.
   mesh = new THREE.Group();

@@ -491,6 +491,28 @@ def test_target_units_version_the_viewers_cached_geometry(tmp_path):
     )
 
 
+def test_embedded_glb_is_served_exactly_while_comparison_uses_millimetres(tmp_path):
+    server = project(tmp_path)
+    source = trimesh.creation.box(extents=[0.04, 0.03, 0.01]).export(file_type="glb")
+    (tmp_path / "scans" / "textured.glb").write_bytes(source)
+    (tmp_path / "parts" / "thing.md").write_text(
+        '# thing\n\n```toml\ntarget = { file = "scans/textured.glb", units = "m" }\n```\n'
+    )
+
+    entry = server.rebuild(tmp_path / "parts" / "thing.py")
+    response = asyncio.run(
+        server.http(None, SimpleNamespace(path="/glb/thing.target.glb?cache=ignored"))
+    )
+
+    assert response.body == source
+    assert entry["target_glb"] == source
+    assert entry["target"]["display_scale"] == 1000.0
+    assert entry["target"]["dimensions"] == pytest.approx([40.0, 30.0, 10.0])
+    assert server.targets[("scans/textured.glb", "m")]["mesh"].extents == pytest.approx(
+        [40.0, 30.0, 10.0]
+    )
+
+
 def test_compare_command_walks_the_cards_variants(tmp_path, monkeypatch, capsys):
     project(tmp_path)
     card = CARD.replace(

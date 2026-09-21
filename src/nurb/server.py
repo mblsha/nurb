@@ -793,6 +793,7 @@ class Server:
             "units": units,
             "unit": hit["unit"],
             "unit_source": hit["unit_source"],
+            "display_scale": hit["display_scale"],
             "dimensions": hit["dimensions"],
             "tolerance_mm": declared["tolerance_mm"],
             "transform": transform,
@@ -807,7 +808,7 @@ class Server:
         """The loaded target, cached by the file's mtime."""
         import trimesh
 
-        from . import compare
+        from . import compare, scan
 
         path = pathlib.Path(file)
         if not path.is_absolute():
@@ -825,9 +826,41 @@ class Server:
         if hit and hit["stamp"] == stamp:
             return hit
         mesh, unit, unit_source = compare.load(self.root, file, units=units)
+        # A GLB can carry its texture in the same file. Keep those exact bytes for
+        # the browser instead of exporting the welded comparison mesh, which has
+        # deliberately discarded UV seams and materials. Files with sidecar URIs
+        # retain the old normalized export because the target route serves one
+        # self-contained response and must never resolve arbitrary project paths.
+        source_glb = None
+        if scan.reference_suffix(path) == ".glb":
+            body = path.read_bytes()
+            try:
+                if len(body) < 20 or body[:4] != b"glTF":
+                    raise ValueError
+                json_length = int.from_bytes(body[12:16], "little")
+                if body[16:20] != b"JSON" or 20 + json_length > len(body):
+                    raise ValueError
+                header = json.loads(body[20 : 20 + json_length].decode("utf-8"))
+
+                def external_uri(value):
+                    if isinstance(value, dict):
+                        return any(
+                            (key == "uri" and isinstance(item, str) and not item.startswith("data:"))
+                            or external_uri(item)
+                            for key, item in value.items()
+                        )
+                    if isinstance(value, list):
+                        return any(external_uri(item) for item in value)
+                    return False
+
+                if not external_uri(header):
+                    source_glb = body
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                pass
         hit = {
             "mesh": mesh,
-            "glb": trimesh.Scene([mesh]).export(file_type="glb"),
+            "glb": source_glb or trimesh.Scene([mesh]).export(file_type="glb"),
+            "display_scale": scan.UNITS[unit] if source_glb is not None else 1.0,
             "stamp": stamp,
             "path": path.resolve(),
             "unit": unit,

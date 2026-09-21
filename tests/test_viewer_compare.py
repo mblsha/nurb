@@ -77,6 +77,7 @@ assert.equal(compareMarks.children.length, 0);
 
 
 def test_reference_transform_is_row_major_and_old_offsets_still_work():
+    helpers = function("function referenceUsesSourceMaterial(", "async function ghostAttach(")
     attach = function("async function ghostAttach(", "// ---- comparison panel ----")
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
@@ -84,9 +85,11 @@ def test_reference_transform_is_row_major_and_old_offsets_still_work():
         "const renderer = true, plane = new THREE.Plane(), mesh = new THREE.Group();\n"
         "const ghostGeo = new Map(), ghostMaterial = new THREE.MeshBasicMaterial();\n"
         "const current = 'part', ghostWanted = true, parts = new Map(), comparePreview = new Map();\n"
+        "let inspectionMode = 'overlay';\n"
         "function comparePanel() {}\n"
         "const geometry = new THREE.BoxGeometry();\n"
-        "const loader = {loadAsync: async () => ({scene: new THREE.Mesh(geometry)})};\n"
+        "let loads = 0; const loader = {loadAsync: async () => { loads++; return {scene: new THREE.Mesh(geometry)}; }};\n"
+        + helpers
         + attach
         + """
 const target = {stamp: 'ref', transform: [0,-1,0,10, 1,0,0,20, 0,0,1,30, 0,0,0,1]};
@@ -96,8 +99,110 @@ assert.deepEqual(new THREE.Vector3(2,3,4).applyMatrix4(ghost.matrix).toArray(), 
 delete target.transform; target.offset = [5,6,7];
 const legacy = await ghostAttach(current, entry);
 assert.deepEqual(legacy.position.toArray(), [5,6,7]);
+assert.equal(loads, 1);
 parts.set(current, {target: {stamp: 'changed'}});
 assert.equal(await ghostAttach(current, entry), undefined);
+"""
+    )
+
+
+def test_reference_and_side_by_side_use_source_texture_while_analysis_modes_use_amber():
+    helpers = function("function referenceUsesSourceMaterial(", "async function ghostAttach(")
+    run_js(
+        f"import * as THREE from {json.dumps(THREE)};\n"
+        "import assert from 'node:assert/strict';\n"
+        "const plane = new THREE.Plane();\n"
+        "const ghostMaterial = new THREE.MeshBasicMaterial({color: 0xd9a066, transparent: true, opacity: .35, depthWrite: false});\n"
+        + helpers
+        + """
+const texture = new THREE.Texture();
+const sourceMaterial = new THREE.MeshBasicMaterial({map: texture, transparent: true, opacity: .72, depthWrite: true});
+const geometry = new THREE.BoxGeometry(1,2,3);
+const source = new THREE.Group(); source.add(new THREE.Mesh(geometry, sourceMaterial));
+const reference = referenceInstance(source, 10);
+const shown = referenceMeshes(reference)[0];
+referenceSetMode(reference, 'reference');
+assert.equal(shown.material.map, texture);
+assert.equal(shown.material.opacity, .72);
+assert.equal(shown.material.depthWrite, true);
+assert.equal(shown.material.side, THREE.DoubleSide);
+assert.deepEqual(shown.material.clippingPlanes, [plane]);
+referenceSetMode(reference, 'overlay');
+assert.equal(shown.material.map, null);
+assert.equal(shown.material.opacity, .35);
+assert.equal(shown.material.depthWrite, false);
+assert.equal(shown.material.color.getHex(), 0xd9a066);
+referenceSetMode(reference, 'deviation');
+assert.equal(shown.material.map, null);
+referenceSetMode(reference, 'section');
+assert.equal(shown.material.map, null);
+referenceSetMode(reference, 'side-by-side');
+assert.equal(shown.material.map, texture);
+assert.equal(reference.children[0].scale.x, 10);
+"""
+    )
+
+
+def test_reference_scene_strips_non_mesh_content_and_remaps_skinned_bones():
+    helpers = function("function referenceUsesSourceMaterial(", "async function ghostAttach(")
+    run_js(
+        f"import * as THREE from {json.dumps(THREE)};\n"
+        "import assert from 'node:assert/strict';\n"
+        "const plane = new THREE.Plane();\n"
+        "const ghostMaterial = new THREE.MeshBasicMaterial();\n"
+        + helpers
+        + """
+const source = new THREE.Group();
+const carrier = new THREE.Group(); carrier.position.set(3,4,5);
+carrier.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial())); source.add(carrier);
+const bone = new THREE.Bone(); bone.name = 'kept-bone'; source.add(bone);
+const skinned = new THREE.SkinnedMesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
+skinned.bind(new THREE.Skeleton([bone])); source.add(skinned);
+const camera = new THREE.PerspectiveCamera(); camera.position.set(7,8,9);
+camera.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial())); source.add(camera);
+source.add(new THREE.DirectionalLight(),
+  new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial()),
+  new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial()));
+referenceSanitizeScene(source);
+const nodes = []; source.traverse(node => nodes.push(node));
+assert.equal(nodes.some(node => node.isCamera || node.isLight || node.isLine || node.isPoints), false);
+assert.equal(referenceMeshes(source).length, 3);
+assert.equal(source.getObjectByName('kept-bone'), bone);
+assert.ok(referenceMeshes(source).some(node => node.parent?.isGroup && node.parent.position.equals(new THREE.Vector3(7,8,9))));
+const instance = referenceInstance(source, 1);
+const clonedSkin = referenceMeshes(instance).find(node => node.isSkinnedMesh);
+assert.ok(clonedSkin);
+assert.notEqual(clonedSkin.skeleton.bones[0], bone);
+assert.equal(clonedSkin.skeleton.bones[0].name, 'kept-bone');
+"""
+    )
+
+
+def test_reference_section_assembles_open_primitive_chains_into_one_closed_contour():
+    contours = function("function sectionSegments(", "// Separable squared Euclidean distance transform.")
+    run_js(
+        f"import * as THREE from {json.dumps(THREE)};\n"
+        "import assert from 'node:assert/strict';\n"
+        + contours
+        + """
+function sides(edges) {
+  const positions = [];
+  for (const [[ax,ay],[bx,by]] of edges) positions.push(
+    ax,ay,-1, ax,ay,1, bx,by,1,
+    ax,ay,-1, bx,by,1, bx,by,-1);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
+  return new THREE.Mesh(geometry);
+}
+const first = sides([[[-1,-1],[1,-1]], [[1,-1],[1,1]]]);
+const second = sides([[[1,1],[-1,1]], [[-1,1],[-1,-1]]]);
+const identity = new THREE.Matrix4();
+assert.equal(sectionContours(first.geometry, identity, 2, 0).valid, false);
+assert.equal(sectionContours(second.geometry, identity, 2, 0).valid, false);
+const combined = sectionContoursMany([first,second], () => identity, 2, 0);
+assert.equal(combined.valid, true);
+assert.equal(combined.loops.length, 1);
+assert.equal(combined.segments.length, 8);
 """
     )
 
@@ -231,6 +336,7 @@ def test_narrow_embed_uses_a_full_width_bottom_sheet_and_failed_apply_keeps_prev
 
 
 def test_changed_reference_disposes_only_the_retired_cached_geometry():
+    helpers = function("function referenceUsesSourceMaterial(", "async function ghostAttach(")
     attach = function("async function ghostAttach(", "// ---- comparison panel ----")
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
@@ -238,20 +344,60 @@ def test_changed_reference_disposes_only_the_retired_cached_geometry():
         "const renderer = true, plane = new THREE.Plane(), mesh = new THREE.Group();\n"
         "const ghostGeo = new Map(), ghostMaterial = new THREE.MeshBasicMaterial();\n"
         "const current = 'part', ghostWanted = true, parts = new Map(), comparePreview = new Map();\n"
+        "let inspectionMode = 'overlay';\n"
         "function comparePanel() {}\n"
         "const oldGeometry = new THREE.BoxGeometry(), newGeometry = new THREE.SphereGeometry();\n"
-        "let oldDisposed = 0, newDisposed = 0;\n"
+        "let oldImageClosed = 0, newImageClosed = 0;\n"
+        "const oldImage = {close: () => oldImageClosed++}, newImage = {close: () => newImageClosed++};\n"
+        "const oldTexture = new THREE.Texture(oldImage), oldNormal = new THREE.Texture(oldImage), newTexture = new THREE.Texture(newImage);\n"
+        "const oldMaterial = new THREE.MeshBasicMaterial({map: oldTexture}); oldMaterial.normalMap = oldNormal;\n"
+        "const newMaterial = new THREE.MeshBasicMaterial({map: newTexture});\n"
+        "let oldDisposed = 0, newDisposed = 0, oldTextureDisposed = 0, oldNormalDisposed = 0, newTextureDisposed = 0;\n"
         "oldGeometry.dispose = () => oldDisposed++; newGeometry.dispose = () => newDisposed++;\n"
-        "const loads = [oldGeometry, newGeometry];\n"
-        "const loader = {loadAsync: async () => ({scene: new THREE.Mesh(loads.shift())})};\n"
+        "oldTexture.dispose = () => oldTextureDisposed++; oldNormal.dispose = () => oldNormalDisposed++; newTexture.dispose = () => newTextureDisposed++;\n"
+        "const loads = [new THREE.Mesh(oldGeometry, oldMaterial), new THREE.Mesh(newGeometry, newMaterial)];\n"
+        "const loader = {loadAsync: async () => ({scene: loads.shift()})};\n"
+        + helpers
         + attach
         + """
 const first = {target: {stamp: 'first'}}; parts.set(current, first);
 await ghostAttach(current, first);
 const second = {target: {stamp: 'second'}}; parts.set(current, second);
 const ghost = await ghostAttach(current, second);
-assert.equal(ghost.geometry, newGeometry);
+assert.equal(referenceMeshes(ghost)[0].geometry, newGeometry);
 assert.equal(oldDisposed, 1);
 assert.equal(newDisposed, 0);
+assert.equal(oldTextureDisposed, 1);
+assert.equal(oldNormalDisposed, 1);
+assert.equal(newTextureDisposed, 0);
+assert.equal(oldImageClosed, 1);
+assert.equal(newImageClosed, 0);
+"""
+    )
+
+
+def test_lost_reference_load_race_disposes_texture_and_closes_decoded_image():
+    helpers = function("function referenceUsesSourceMaterial(", "async function ghostAttach(")
+    attach = function("async function ghostAttach(", "// ---- comparison panel ----")
+    run_js(
+        f"import * as THREE from {json.dumps(THREE)};\n"
+        "import assert from 'node:assert/strict';\n"
+        "const renderer = true, plane = new THREE.Plane(), mesh = new THREE.Group();\n"
+        "const ghostGeo = new Map(), ghostMaterial = new THREE.MeshBasicMaterial();\n"
+        "const current = 'part', ghostWanted = true, parts = new Map(), comparePreview = new Map();\n"
+        "let inspectionMode = 'overlay', closed = 0, textureDisposed = 0;\n"
+        "function comparePanel() {}\n"
+        "const image = {close: () => closed++}, texture = new THREE.Texture(image);\n"
+        "texture.dispose = () => textureDisposed++;\n"
+        "const source = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial({map: texture}));\n"
+        "const loader = {loadAsync: async () => { parts.set(current, {target: {stamp: 'new'}}); return {scene: source}; }};\n"
+        + helpers
+        + attach
+        + """
+const entry = {target: {stamp: 'old'}}; parts.set(current, entry);
+assert.equal(await ghostAttach(current, entry), undefined);
+assert.equal(textureDisposed, 1);
+assert.equal(closed, 1);
+assert.equal(ghostGeo.size, 0);
 """
     )
