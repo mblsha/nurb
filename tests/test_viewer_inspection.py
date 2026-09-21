@@ -289,3 +289,15 @@ verificationLanded({name:'part',token:'new',status:'unknown',error:'deadline'});
 assert.equal(entry.target.verification.status,'unknown'); assert.equal(renders,1);
 assert.equal(entry.target.verification.metrics,undefined);
 """)
+
+
+def test_precise_verification_shows_stale_without_reusing_old_metrics():
+    js([("function verificationShow(", "function verificationLanded(")], """
+const current='part', verificationHistory=new Map([['part',{token:'old',status:'measured',metrics:{part:{sampled_max:0}}}]]);
+const fields={verifyresult:{replaceChildren(){this.cleared=true}},verifyrun:{},verifycancel:{},verifystatus:{}};
+const document={getElementById:id=>fields[id]};
+verificationShow({name:'part',token:'new',target:{}});
+assert.equal(fields.verifyresult.cleared,true);
+assert.match(fields.verifystatus.textContent,/stale/);
+assert.equal(fields.verifycancel.disabled,true);
+""")

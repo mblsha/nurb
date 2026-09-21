@@ -230,6 +230,7 @@ def against(
     provenance=None,
     mesh_policy=None,
     stop=None,
+    feature_sections=False,
 ):
     """Return bidirectional deviation, tolerance coverage, and spatial samples.
 
@@ -330,6 +331,7 @@ def against(
                 mesh_policy=policy,
                 deadline=deadline,
                 stop=stop,
+                feature_sections=feature_sections,
             )
             for region in inspection_regions(regions)
         ]
@@ -366,6 +368,7 @@ def _inspect_region(
     mesh_policy=None,
     deadline=None,
     stop=None,
+    feature_sections=False,
 ):
     from .meshing import check_cancelled
     check_cancelled(stop)
@@ -396,6 +399,11 @@ def _inspect_region(
         result["reference_selection"] = "reference surface inside the component bounds"
     result.update({"bounds_mm": bounds, "capture": {"region": region["name"], "bounds_mm": bounds, "frame": "part_mm"}})
     local_part, local_target = _clip_region(selected, bounds), _clip_region(target, bounds)
+    if feature_sections and "feature" in region:
+        from . import feature_evidence
+        definitions = region["feature"].get("sections", [])
+        result["local_sections"] = {"cad": feature_evidence.sections(local_part, definitions),
+                                   "reference": feature_evidence.sections(local_target, definitions)}
     worst, samples, missing, detected = [], {}, [], False
     for key, local, other, direction in (("part", local_part, target_surface, "part_to_target"), ("target", local_target, part_surface, "target_to_part")):
         if not len(local.faces) or local.area <= 1e-12:

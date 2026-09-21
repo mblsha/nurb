@@ -1937,8 +1937,10 @@ featureField('review').onclick = () => featureInspect(true);
 featureField('station').onchange = featurePlot;
 
 // ---- separately budgeted precise comparison ----
+const verificationHistory = new Map();
 function verificationShow(entry) {
-  const state = entry?.target?.verification, output = document.getElementById('verifyresult');
+  if (entry?.target?.verification) verificationHistory.set(entry.name,entry.target.verification);
+  const state = entry?.target?.verification || verificationHistory.get(entry?.name), output = document.getElementById('verifyresult');
   const currentState = state && state.token === entry?.token && !entry?.target?.stale;
   const active = currentState && ['queued','running','cancelling'].includes(state.status);
   document.getElementById('verifyrun').disabled = active || !entry?.target || !!entry.target.stale;

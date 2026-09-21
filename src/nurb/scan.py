@@ -401,6 +401,7 @@ def section(mesh, spec, tolerance=0.2):
         from .feature_evidence import section_definition
 
         definition = section_definition(spec)
+        tolerance = definition["tolerance_mm"]
         origin, normal, u = (np.asarray(definition[key]) for key in ("origin_mm", "normal", "x_direction"))
         basis = np.asarray([u, np.cross(normal, u)])
         axis_name, pos, plane_axes = "local", 0.0, ("u", "v")

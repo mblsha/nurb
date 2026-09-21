@@ -1051,6 +1051,7 @@ def cmd_compare(args):
                         tolerance_mm=tolerance_mm,
                         transform=active_transform,
                         regions=regions,
+                        feature_sections=any("feature" in region for region in regions),
                         mesh_policy=VerificationPolicy.for_tolerance(
                             tolerance_mm,
                             accuracy_mm=getattr(args, "mesh_accuracy", None),
@@ -1064,16 +1065,14 @@ def cmd_compare(args):
                     from . import feature_evidence
                     geometry_id = feature_evidence.shape_identity(shape)
                     reference_id = hashlib.sha256(_reference_path(root, file).read_bytes() + unit.encode()).hexdigest()
-                    aligned = mesh.copy()
-                    aligned.apply_transform(compare._transform(metrics["transform"]))
-                    cad_mesh = builder.to_mesh(shape)
                     def feature_result(region):
-                        local_cad, local_reference = feature_evidence.selected_meshes(shape, cad_mesh, aligned, region)
+                        regional = next(item for item in metrics["inspection_regions"] if item["name"] == region["name"])
+                        sections = regional.get("local_sections", {})
                         return {**feature_evidence.region_evidence(geometry_id, reference_id, metrics["transform"],
                                                                    name if overrides else None, region),
                                 "frame": "part_mm", "method": "comparison mesh contours inside the region, without artificial caps",
-                                "cad": feature_evidence.sections(local_cad, region["feature"].get("sections", [])),
-                                "reference": feature_evidence.sections(local_reference, region["feature"].get("sections", []))}
+                                "cad": sections.get("cad", []), "reference": sections.get("reference", []),
+                                "section_status": regional["status"], "provenance": metrics["provenance"]}
                     metrics["feature_evidence"] = [feature_result(region) for region in regions if "feature" in region]
                 metrics["alignment"] = applied_alignment
             except (ValueError, builder.BuildError) as exc:
