@@ -844,3 +844,202 @@ def test_a_reference_remains_available_while_the_cad_source_is_broken(tmp_path):
     assert entry["target"]["transform"] == compare.IDENTITY
     assert entry["target_glb"][:4] == b"glTF"
     assert "target_glb" not in server._meta(entry)
+
+
+def test_precise_verification_returns_without_blocking_commands_and_rejects_a_rebuild(tmp_path, monkeypatch):
+    import threading
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    path = tmp_path / "parts" / "thing.py"
+    original = server.rebuild(path)
+    started, release = threading.Event(), threading.Event()
+    sent = []
+
+    async def capture(payload):
+        sent.append(dict(payload))
+
+    def held(*args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return {"provenance": {"method": "Absolute mesh verification"}}
+
+    server.send = capture
+    monkeypatch.setattr(compare, "against", held)
+
+    async def exercise():
+        await server.command(json.dumps({"type": "target_verify", "name": "thing", "feature_size_mm": 0.3}))
+        task = server.verifications["thing"]
+        assert await asyncio.to_thread(started.wait, 5)
+        assert not server.building.locked()
+        assert sent[0]["status"] == "queued"
+        assert sent[1]["status"] == "running"
+        assert sent[1]["token"] == original["token"]
+        server.rebuild(path)
+        release.set()
+        await task
+
+    asyncio.run(exercise())
+    assert sent[-1]["status"] == "stale"
+    assert "metrics" not in sent[-1]
+    assert "verification" not in server.state["thing"]["target"]
+
+
+def test_precise_verification_failure_replaces_old_evidence_without_replacing_live_metrics(tmp_path, monkeypatch):
+    from nurb.meshing import MeshingError
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    entry = server.rebuild(tmp_path / "parts" / "thing.py")
+    entry["target"]["metrics"] = {"display": "kept"}
+    entry["target"]["verification"] = {"status": "measured", "metrics": {"stale": True}}
+    sent = []
+
+    async def capture(payload):
+        sent.append(dict(payload))
+
+    def failed(*args, **kwargs):
+        raise MeshingError("Verification unknown: meshing exceeded its budget")
+
+    server.send = capture
+    monkeypatch.setattr(compare, "against", failed)
+
+    async def exercise():
+        await server.command(json.dumps({"type": "target_verify", "name": "thing"}))
+        assert "metrics" not in entry["target"]["verification"]
+        await server.verifications["thing"]
+
+    asyncio.run(exercise())
+    assert sent[-1]["status"] == "unknown"
+    assert "metrics" not in entry["target"]["verification"]
+    assert entry["target"]["metrics"] == {"display": "kept"}
+    assert not server.verifications
+
+
+def test_absolute_cli_evidence_names_accuracy_and_feature_budget(tmp_path, monkeypatch, capsys):
+    project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    cli.main(["compare", "thing", "--json", "--mesh-accuracy", "0.02", "--feature-size", "0.3"])
+    result = json.loads(capsys.readouterr().out)["comparisons"][0]
+    assert result["status"] == "measured"
+    assert result["provenance"]["absolute_deflection_mm"] == 0.02
+    assert result["provenance"]["feature_size_mm"] == 0.3
+    assert result["provenance"]["cad_triangles"] == 12
+    assert result["provenance"]["measured_error_bound_mm"] is None
+
+
+def test_failed_live_comparison_drops_previous_metrics(tmp_path, monkeypatch):
+    server = project(tmp_path)
+    path = tmp_path / "parts" / "thing.py"
+    entry = server.rebuild(path)
+    entry["target"]["metrics"] = {"outdated": True}
+    def fail(*args, **kwargs):
+        raise ValueError("invalid display geometry")
+    monkeypatch.setattr(compare, "against", fail)
+    server.check(path)
+    assert "metrics" not in entry["target"]
+    assert "invalid display geometry" in entry["target"]["error"]
+
+
+def test_precise_verification_real_worker_finishes_and_keeps_preview_estimate(tmp_path):
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    entry = server.rebuild(tmp_path / "parts" / "thing.py")
+    entry["target"]["metrics"] = {"display": "estimate"}
+    sent = []
+
+    async def capture(payload):
+        sent.append(dict(payload))
+
+    server.send = capture
+
+    async def exercise():
+        await server.command(json.dumps({"type": "target_verify", "name": "thing", "accuracy_mm": 0.02, "feature_size_mm": 0.3}))
+        await server.verifications["thing"]
+
+    asyncio.run(exercise())
+    assert [item["status"] for item in sent] == ["queued", "running", "measured"]
+    assert sent[-1]["metrics"]["provenance"]["cad_triangles"] == 12
+    assert sent[-1]["identity"]["shape_id"] == entry["shape_id"]
+    assert sent[-1]["identity"]["build_inputs"]
+    assert entry["target"]["metrics"] == {"display": "estimate"}
+
+
+def test_cli_timeout_is_unknown_and_has_no_comparison_numbers(tmp_path, monkeypatch, capsys):
+    project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    cli.main(["compare", "thing", "--json", "--mesh-timeout", "0.001"])
+    result = json.loads(capsys.readouterr().out)
+    assert result["comparisons"] == []
+    assert result["skipped"][0]["status"] == "unknown"
+    assert "meshing exceeded" in result["skipped"][0]["reason"]
+
+
+@pytest.mark.parametrize("changed", ["source", "reference", "sliders"])
+def test_verification_refuses_inputs_that_changed_before_the_rebuild(tmp_path, monkeypatch, changed):
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    path = tmp_path / "parts" / "thing.py"
+    server.rebuild(path)
+    if changed == "source":
+        path.write_text(PART.replace("width=40.0", "width=45.0"))
+    elif changed == "reference":
+        trimesh.creation.box(extents=[45, 30, 10]).export(tmp_path / "scans" / "original.stl")
+    else:
+        server.overrides["thing"] = {"width": 45.0}
+    sent = []
+
+    async def capture(payload):
+        sent.append(dict(payload))
+
+    server.send = capture
+    monkeypatch.setattr(compare, "against", lambda *a, **kw: pytest.fail("outdated geometry reached verification"))
+
+    async def exercise():
+        await server.command(json.dumps({"type": "target_verify", "name": "thing"}))
+        await server.verifications["thing"]
+
+    asyncio.run(exercise())
+    assert sent[-1]["status"] == "unknown"
+    assert "rebuild" in sent[-1]["error"]
+    assert "metrics" not in sent[-1]
+
+
+def test_cancel_verification_requires_matching_request_and_produces_no_metrics(tmp_path, monkeypatch):
+    import threading
+    import time
+    from nurb.meshing import check_cancelled
+    server = project(tmp_path)
+    server.queue = asyncio.Queue()
+    entry = server.rebuild(tmp_path / "parts" / "thing.py")
+    started = threading.Event()
+    sent = []
+
+    async def capture(payload):
+        sent.append(dict(payload))
+
+    def held(*args, stop, **kwargs):
+        started.set()
+        while not stop():
+            time.sleep(0.01)
+        check_cancelled(stop)
+
+    server.send = capture
+    monkeypatch.setattr(compare, "against", held)
+
+    async def exercise():
+        await server.command(json.dumps({"type": "target_verify", "name": "thing"}))
+        task = server.verifications["thing"]
+        assert await asyncio.to_thread(started.wait, 5)
+        request, stopped = server.verification_controls["thing"]
+        cancel = {"type": "target_verify_cancel", "name": "thing", "token": entry["token"], "request_id": "old"}
+        await server.command(json.dumps(cancel))
+        assert not stopped.is_set()
+        cancel["request_id"] = request["request_id"]
+        await server.command(json.dumps(cancel))
+        await task
+
+    asyncio.run(exercise())
+    assert [response["status"] for response in sent] == ["queued", "running", "cancelling", "cancelled"]
+    assert "metrics" not in sent[-1]
+    assert entry["target"]["verification"]["status"] == "cancelled"
+    assert not server.verifications
+    assert not server.verification_controls

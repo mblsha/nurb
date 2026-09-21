@@ -259,6 +259,8 @@ class Server:
         # mtime: a scan can be a quarter-million triangles, and re-reading it on
         # every save would put a constant tax on the loop for a file that never moves.
         self.targets = {}
+        self.verifications = {}
+        self.verification_controls = {}
         # A legacy target has no stored frame. Center it once per server session and
         # hold that frame while the editable part changes, so an extremity edit does
         # not move the reference and disguise the actual difference.
@@ -793,6 +795,7 @@ class Server:
         target = entry.get("target")
         if target and not target.get("error"):
             from . import compare
+            from .meshing import display_provenance
 
             try:
                 hit = self._target_mesh(target["file"], target.get("units"))
@@ -805,18 +808,100 @@ class Server:
                     regions=target.get("regions"),
                     part_mesh=part_mesh,
                     component_meshes=component_meshes,
-                    provenance={
-                        "method": "Display mesh estimate",
-                        "detail": "CAD distances use the cached viewer tessellation with scene transforms applied; `nurb compare` uses a finer absolute tessellation.",
-                    },
+                    provenance=display_provenance(self.tolerance),
                 )
                 # The ghost draws with the transform the numbers used, never a stale one.
                 target["transform"] = metrics.pop("transform")
                 target["offset"] = metrics.pop("offset")
                 target["metrics"] = metrics
             except Exception as exc:
+                target.pop("metrics", None)
                 target["error"] = f"{type(exc).__name__}: {exc}"
         return entry
+
+    async def _verify_target(self, path, request, policy, client, stopped):
+        """Measure a snapshot without holding the live build lock during meshing."""
+        import copy
+        from . import compare
+        from .meshing import VerificationCancelled, check_cancelled
+
+        name = path.stem
+        response = {"type": "target_verification", "name": name, **request}
+        entry = self.state.get(name, {})
+        try:
+            async with self.building:
+                check_cancelled(stopped.is_set)
+                if self.state.get(name) is not entry or entry.get("token") != request["token"]:
+                    raise ValueError("the model changed before verification started; run verification again")
+                target = entry.get("target")
+                if not target or target.get("error") or target.get("stale"):
+                    raise ValueError("attach a current, readable reference before verifying")
+                snapshot = copy.deepcopy({key: target.get(key) for key in ("file", "units", "stamp", "transform", "tolerance_mm", "regions")})
+                card = path.with_suffix(".md")
+                source_bytes, card_bytes = path.read_bytes(), card.read_bytes()
+                source_snapshot = self._source_snapshot(path)
+                source_set = self._build_sources(path, entry["shape"], source_snapshot)
+                source_identity = self._build_inputs(source_set, source_snapshot)
+                if source_identity is None:
+                    raise ValueError("the model source snapshot could not be read")
+                overrides_snapshot = copy.deepcopy(self.overrides.get(name))
+                built = self.prints.get(name)
+                if built != (source_identity, repr(sorted((overrides_snapshot or {}).items())), entry.get("shape_id")):
+                    raise ValueError("the model inputs changed; wait for the rebuild before verifying")
+                hit = self._target_mesh(target["file"], target.get("units"))
+                if hit["stamp"] != snapshot["stamp"]:
+                    raise ValueError("the reference changed; wait for its rebuild before verifying")
+                reference_stat = hit["path"].stat()
+                # Only this short copy touches live OCCT geometry. The verification
+                # process will mesh its own B-rep and cannot change the preview.
+                shape = copy.deepcopy(entry["shape"])
+                reference = hit["mesh"].copy()
+                response.update(status="running", phase="Meshing and measuring", provenance=policy.provenance(target["tolerance_mm"]),
+                                identity={"token": request["token"], "reference_stamp": target["stamp"],
+                                          "shape_id": entry.get("shape_id"), "build_inputs": source_identity,
+                                          "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                                          "card_sha256": hashlib.sha256(card_bytes).hexdigest()})
+                target["verification"] = dict(response)
+            await self.reply(client, response)
+            metrics = await asyncio.to_thread(
+                compare.against, shape, reference,
+                tolerance_mm=snapshot["tolerance_mm"], transform=snapshot["transform"],
+                regions=snapshot["regions"], mesh_policy=policy, stop=stopped.is_set,
+            )
+            check_cancelled(stopped.is_set)
+            current = self.state.get(name, {})
+            target = current.get("target") or {}
+            current_stat = hit["path"].stat()
+            if (current is not entry or current.get("token") != request["token"]
+                    or target.get("error") or target.get("stale")
+                    or any(target.get(key) != value for key, value in snapshot.items())
+                    or path.read_bytes() != source_bytes or card.read_bytes() != card_bytes
+                    or self._build_inputs(source_set, self._source_snapshot(path)) != source_identity
+                    or self.overrides.get(name) != overrides_snapshot
+                    or (current_stat.st_mtime_ns, current_stat.st_ctime_ns, current_stat.st_size)
+                       != (reference_stat.st_mtime_ns, reference_stat.st_ctime_ns, reference_stat.st_size)):
+                response.update(status="stale", phase="Superseded", error="The model or reference changed during verification; run it again.")
+            else:
+                response.update(status="measured", phase="Complete", metrics=metrics, provenance=metrics["provenance"])
+        except asyncio.CancelledError:
+            stopped.set()
+            response.update(status="cancelled", phase="Stopped", error="Verification cancelled; no result was produced.")
+            response.pop("metrics", None)
+            raise
+        except VerificationCancelled as exc:
+            response.update(status="cancelled", phase="Stopped", error=str(exc))
+            response.pop("metrics", None)
+        except Exception as exc:
+            response.update(status="unknown", phase="Verification unavailable", error=f"{type(exc).__name__}: {exc}")
+            response.pop("metrics", None)
+        finally:
+            current = self.state.get(name, {})
+            target = current.get("target")
+            if current is entry and current.get("token") == request["token"] and target:
+                target["verification"] = dict(response)
+            self.verifications.pop(name, None)
+            self.verification_controls.pop(name, None)
+        await self.reply(client, response)
 
     # ---------- target mesh ----------
 
@@ -1572,6 +1657,51 @@ class Server:
         parts_dir = (self.root / "parts").resolve()
         path = (parts_dir / f"{name}.py").resolve()
         if path.parent != parts_dir or not path.is_file():
+            return
+
+        if msg.get("type") == "target_verify_cancel":
+            control = self.verification_controls.get(name)
+            if control is not None:
+                request, stopped = control
+                if msg.get("token") == request["token"] and msg.get("request_id") == request["request_id"]:
+                    stopped.set()
+                    response = {"type": "target_verification", "name": name, **request,
+                                "status": "cancelling", "phase": "Stopping verification"}
+                    target = (self.state.get(name) or {}).get("target")
+                    if target and self.state[name].get("token") == request["token"]:
+                        target["verification"] = response
+                    await self.reply(client, response)
+            return
+
+        if msg.get("type") == "target_verify":
+            from .meshing import VerificationPolicy
+
+            entry = self.state.get(name, {})
+            target = entry.get("target") or {}
+            request = {"request_id": secrets.token_hex(8), "token": entry.get("token"),
+                       "status": "queued", "phase": "Preparing CAD snapshot"}
+            try:
+                if name in self.verifications or len(self.verifications) >= 2:
+                    raise ValueError("Verification is already running; wait for it to finish before starting another.")
+                if entry.get("shape") is None or not target:
+                    raise ValueError("Build a valid model and attach a reference before verifying.")
+                policy = VerificationPolicy.for_tolerance(
+                    target["tolerance_mm"], accuracy_mm=msg.get("accuracy_mm"),
+                    feature_size_mm=msg.get("feature_size_mm"), timeout_s=msg.get("timeout_s", 30.0),
+                    max_triangles=msg.get("max_triangles", 1_000_000),
+                )
+                request["provenance"] = policy.provenance(target["tolerance_mm"])
+                target["verification"] = {"type": "target_verification", "name": name, **request}
+                await self.reply(client, target["verification"])
+                stopped = threading.Event()
+                self.verification_controls[name] = (request, stopped)
+                self.verifications[name] = asyncio.create_task(self._verify_target(path, request, policy, client, stopped))
+            except (ValueError, TypeError, KeyError) as exc:
+                response = {"type": "target_verification", "name": name, **request,
+                            "status": "unknown", "phase": "Verification unavailable", "error": str(exc)}
+                if target and name not in self.verifications:
+                    target["verification"] = response
+                await self.reply(client, response)
             return
 
         if msg.get("type") == "target_inspection":
