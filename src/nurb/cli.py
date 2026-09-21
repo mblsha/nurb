@@ -951,6 +951,33 @@ def cmd_symmetry(args):
 
 
 def cmd_compare(args):
+    from . import bounded
+    if bounded.fresh(): return _cmd_compare(args)
+    try:
+        result=bounded.run(lambda:bounded.stage('nurb.cli','_bounded_compare_command',arguments={k:v for k,v in vars(args).items() if k!='fn'}),
+            timeout_s=getattr(args,'mesh_timeout',30),memory_limit_mb=getattr(args,'memory_limit',2048),
+            progress=None if args.json else lambda state:print('  '+state['phase'],file=sys.stderr,flush=True))
+        if args.json and result['stdout'].strip():
+            evidence=json.loads(result['stdout'])
+            evidence['resources']=result['resources']
+            result['stdout']=json.dumps(evidence,indent=2,allow_nan=False)+'\n'
+        print(result['stdout'],end='');print(result['stderr'],end='',file=sys.stderr)
+        if result['exit_code'] is not None: raise SystemExit(result['exit_code'])
+    except (bounded.WorkError, ValueError) as exc:
+        if args.json:
+            print(json.dumps({'schema_version':1,'comparisons':[],'skipped':[{'part':args.part,'status':'unknown','reason':str(exc),'failure':getattr(exc,'reason','invalid_options'),'resources':getattr(exc,'resources',{})}]}))
+        else: print(str(exc),file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
+def _bounded_compare_command(arguments):
+    from argparse import Namespace
+    from . import bounded
+    arguments.pop('fn',None)
+    return bounded.capture_command(_cmd_compare,Namespace(**arguments))
+
+
+def _cmd_compare(args):
     """Measure a part against the mesh it is remodelling, both directions.
 
     The target normally comes from the card, so the dev loop's ghost and this report
@@ -1038,6 +1065,10 @@ def cmd_compare(args):
                 skipped.append({"part": path.stem, "reason": reason})
                 continue
             sys.exit(f"  {reason}")
+        from . import bounded, symmetry
+        bounded.phase('Loading comparison inputs')
+        revision = symmetry.source_revision(path)
+        input_files = bounded.file_identity([_reference_path(root, file)])
         try:
             if not _reference_path(root, file).is_file():
                 raise ValueError(f"no file: {file}")
@@ -1103,6 +1134,7 @@ def cmd_compare(args):
                             feature_size_mm=feature_evidence.smallest_feature_size(regions, getattr(args, "feature_size", None)),
                             timeout_s=getattr(args, "mesh_timeout", 30.0),
                             max_triangles=getattr(args, "mesh_triangles", 1_000_000),
+                            memory_limit_mb=getattr(args,"memory_limit",2048),
                         ),
                     )
                 if any("feature" in region for region in regions):
@@ -1121,6 +1153,10 @@ def cmd_compare(args):
                                 "cad": sections.get("cad", []), "reference": sections.get("reference", []),
                                 "section_status": regional["status"], "provenance": metrics["provenance"]}
                     metrics["feature_evidence"] = [feature_result(region) for region in regions if "feature" in region]
+                bounded.verify_files(input_files)
+                if symmetry.source_revision(path) != revision:
+                    raise bounded.WorkError("Model inputs changed during comparison; run it again.", "stale")
+                metrics["source_revision"] = revision
                 if getattr(args, "sections_output", None):
                     metrics["section_exports"] = feature_evidence.write_section_exports(
                         args.sections_output, name, metrics.get("feature_evidence", []))
@@ -1132,7 +1168,7 @@ def cmd_compare(args):
                             "part": path.stem,
                             "configuration": name,
                             "reason": str(exc),
-                            **({"status": "unknown"} if isinstance(exc, MeshingError) else {}),
+                            **({"status": "stale" if exc.reason == "stale" else "unknown", "failure": exc.reason} if isinstance(exc, MeshingError) else {}),
                         }
                     )
                     if args.save_alignment and not saved:
@@ -1161,6 +1197,7 @@ def cmd_compare(args):
                 if args.units is not None:
                     changes["units"] = unit
                 compare.update_card(path, **changes)
+                revision = symmetry.source_revision(path)
                 saved = True
                 transform = metrics["transform"]
             identity = _reference_identity(root, file)
@@ -1185,6 +1222,7 @@ def cmd_compare(args):
                     "saved_by_this_run": bool(just_saved),
                 },
                 "status": "measured",
+                "source_revision": metrics.get("source_revision"),
                 "provenance": metrics.get("provenance"),
                 "sample_counts": metrics["sample_count"],
                 "directions": {
@@ -1868,7 +1906,8 @@ def main(argv=None):
     )
     s.add_argument("--mesh-accuracy", type=float, help="requested absolute CAD mesh deflection in mm (default: min(0.025, tolerance/4))")
     s.add_argument("--feature-size", type=float, help="smallest mating feature in mm; warn when mesh accuracy cannot resolve it")
-    s.add_argument("--mesh-timeout", type=float, default=30.0, help="meshing time budget in seconds, at most 120 (default 30)")
+    s.add_argument("--mesh-timeout", type=float, default=30.0, help="end-to-end comparison time budget in seconds, at most 120 (default 30)")
+    s.add_argument("--memory-limit",type=int,default=2048,help="child RSS limit in MiB, enforced on macOS/Linux (default 2048)")
     s.add_argument("--mesh-triangles", type=int, default=1_000_000, help="triangle limit for each verification mesh (default 1000000)")
     s.add_argument("--json", action="store_true", help="write complete structured comparison evidence")
     s.add_argument("--region", action="append", metavar="NAME=BOX", help="inspect NAME=x0,y0,z0:x1,y1,z1 in part mm, or NAME=@component; repeat to name regions")
@@ -1902,7 +1941,8 @@ def main(argv=None):
     s.add_argument("--edge-step", type=float, default=0.5, help="maximum CAD trim-edge sampling step in mm")
     s.add_argument("--face-samples", type=int, default=25, help="interior UV samples per face before trim classification")
     s.add_argument("--sample-budget", type=int, default=20000)
-    s.add_argument("--timeout", type=float, default=30.0, help="worker time limit in seconds, at most 120")
+    s.add_argument("--timeout", type=float, default=30.0, help="end-to-end symmetry time limit in seconds, at most 120")
+    s.add_argument("--memory-limit",type=int,default=2048,help="child RSS limit in MiB, enforced on macOS/Linux (default 2048)")
     s.add_argument("--max-angle", type=float, default=15.0, help="maximum normal tilt search in degrees")
     s.add_argument("--bounds", help='fit region in part mm as JSON: {"min":[x,y,z],"max":[x,y,z]}')
     s.add_argument("--json", action="store_true")

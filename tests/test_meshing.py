@@ -31,7 +31,7 @@ def test_small_feature_and_loose_acceptance_budget_are_reported_independently():
 
 def test_verification_kills_a_meshing_process_that_exceeds_its_time_budget():
     started = time.monotonic()
-    with pytest.raises(MeshingError, match="Verification unknown: meshing exceeded"):
+    with pytest.raises(MeshingError, match="Verification unknown: end-to-end time budget exceeded"):
         verification_mesh(Box(1, 1, 1), VerificationPolicy(0.01, timeout_s=0.001))
     assert time.monotonic() - started < 5
 
@@ -53,20 +53,16 @@ def test_bad_policy_is_rejected_before_any_process_starts(options):
 
 
 def test_cancellation_kills_and_reaps_the_owned_child(monkeypatch):
+    import os
     import threading
-    from nurb import meshing
-    stopped = threading.Event()
-    children = []
-    original = meshing.subprocess.Popen
-
-    def remember(*args, **kwargs):
-        process = original(*args, **kwargs)
-        children.append(process)
-        stopped.set()
-        return process
-
-    monkeypatch.setattr(meshing.subprocess, "Popen", remember)
-    with pytest.raises(meshing.VerificationCancelled, match="cancelled"):
-        verification_mesh(Sphere(3), VerificationPolicy(0.001), stopped.is_set)
-    assert len(children) == 1
-    assert children[0].poll() is not None
+    from nurb import bounded
+    stopped=threading.Event();children=[];fork=bounded.os.fork
+    def remember():
+        pid=fork()
+        if pid:children.append(pid);stopped.set()
+        return pid
+    monkeypatch.setattr(bounded.os,'fork',remember)
+    with pytest.raises(bounded.WorkCancelled,match='cancelled'):
+        verification_mesh(Sphere(3),VerificationPolicy(.001),stopped.is_set)
+    assert len(children)==1
+    with pytest.raises(ChildProcessError):os.waitpid(children[0],os.WNOHANG)

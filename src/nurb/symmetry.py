@@ -5,12 +5,9 @@ import hashlib
 import io
 import json
 import math
-import os
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
-import time
 
 import numpy as np
 
@@ -25,9 +22,12 @@ class Options:
     sample_budget: int = 20000
     timeout_s: float = 30.0
     max_angle_deg: float = 15.0
+    memory_limit_mb: int = 2048
     reference_bounds_mm: dict | None = None
 
     def __post_init__(self):
+        from .bounded import memory_policy
+        memory_policy(self.memory_limit_mb)
         if self.axis not in ("x", "y", "z"):
             raise ValueError("choose an approximate symmetry normal: x, y, or z")
         for name in ("reference_tolerance_mm", "cad_tolerance_mm", "edge_step_mm", "timeout_s", "max_angle_deg"):
@@ -260,11 +260,15 @@ def cad_symmetry(shape, plane, options):
     # A solid distance can classify points in material as distance zero. A compound
     # of faces measures the actual trimmed boundary and detects an unpaired hole.
     boundary = Compound(children=faces)
+    from . import bounded
+    bounded.phase('Trimmed CAD boundary distances')
     distances = np.asarray([boundary.distance_to(Vertex(*point)) for point in reflected])
     if not np.isfinite(distances).all():
         raise ValueError("the CAD kernel returned a non-finite symmetry distance")
+    bounded.phase('Symmetry statistics')
     kinds = np.asarray(kinds)
     from .symmetry_categories import periodic_seams
+    bounded.phase("Periodic seam distances")
     seam_result = periodic_seams(shape, plane, options, options.sample_budget-len(points))
     return {"status": "within_sampled_threshold" if np.max(distances) <= options.cad_tolerance_mm else "deviations",
             "method": "reflected trimmed-face and trim-edge samples to finished boundary-only B-rep",
@@ -280,60 +284,55 @@ def cad_symmetry(shape, plane, options):
 
 
 def run(shape, reference, options, evidence_identity, stop=None, landmarks=None):
-    """Fit and check in one bounded child process, leaving live CAD untouched."""
+    """Bound snapshot, fit, all kernel distances and statistics as one job."""
+    from . import bounded
+    if bounded.fresh(): return _measure(shape,reference,options,evidence_identity,landmarks)
+    return bounded.run(lambda: prepare(shape,reference,options,evidence_identity,landmarks=landmarks),timeout_s=options.timeout_s,memory_limit_mb=options.memory_limit_mb,stop=stop)
+
+
+def _measure(shape,reference,options,evidence_identity,landmarks=None):
+    from . import bounded
+    bounded.phase('Fitting reference symmetry plane')
+    plane=fit_plane(reference,options)
+    bounded.phase('Trimmed CAD sampling and distances')
+    result={'plane':plane,'cad':cad_symmetry(shape,plane,options)}
+    from .symmetry_categories import category_identity, feature_centers
+    bounded.phase('Authored feature center distances')
+    saved = landmarks or {}
+    result['feature_centers'] = {
+        'cad_centers': feature_centers(saved.get('cad_centers', []), plane, options.cad_tolerance_mm),
+        'reference_points': feature_centers(saved.get('reference_points', []), plane, options.reference_tolerance_mm),
+        'unlocated_features': saved.get('unlocated_features', []),
+    }
+    for key, category in (('periodic_seams', result['cad']['periodic_seams']),
+                          ('cad_centers', result['feature_centers']['cad_centers']),
+                          ('reference_points', result['feature_centers']['reference_points'])):
+        category['identity'] = category_identity(evidence_identity, key)
+    return {'kind':'symmetry_evidence','schema_version':2,'status':'measured','identity':evidence_identity,
+            'options':asdict(options),'memory':bounded.memory_policy(options.memory_limit_mb),**result}
+
+
+def prepare(shape,reference,options,evidence_identity,metadata=None,source_files=None,landmarks=None):
+    from . import bounded
     from build123d import export_brep
-    with tempfile.TemporaryDirectory(prefix="nurb-symmetry-") as temporary:
-        root = Path(temporary)
-        export_brep(shape, root / "shape.brep")
-        np.savez(root / "reference.npz", vertices=np.asarray(reference.vertices),
-                 faces=np.asarray(getattr(reference, "faces", []), dtype=int).reshape(-1, 3))
-        (root / "options.json").write_text(json.dumps(asdict(options)))
-        (root / "landmarks.json").write_text(json.dumps(landmarks or {}))
-        env = dict(os.environ); env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent) + os.pathsep + env.get("PYTHONPATH", "")
-        child = subprocess.Popen([sys.executable, "-m", "nurb.symmetry", str(root)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-        deadline = time.monotonic() + options.timeout_s
-        try:
-            while True:
-                if stop and stop():
-                    raise ValueError("Symmetry verification cancelled; no result was produced")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise ValueError(f"Symmetry unknown: verification exceeded {options.timeout_s:g} seconds; increase its time budget or reduce the selected reference region")
-                try:
-                    _, error = child.communicate(timeout=min(0.1, remaining)); break
-                except subprocess.TimeoutExpired:
-                    continue
-            if child.returncode:
-                raise ValueError((error.strip().splitlines() or ["symmetry worker failed"])[-1][:500])
-            result = json.loads((root / "result.json").read_text())
-            from .symmetry_categories import category_identity
-            for key, category in (("periodic_seams", result["cad"]["periodic_seams"]),
-                                  ("cad_centers", result["feature_centers"]["cad_centers"]),
-                                  ("reference_points", result["feature_centers"]["reference_points"])):
-                category["identity"] = category_identity(evidence_identity, key)
-            return {"kind": "symmetry_evidence", "schema_version": 2, "status": "measured", "identity": evidence_identity,
-                    "options": asdict(options), **result}
-        finally:
-            if child.poll() is None:
-                child.kill()
-            child.communicate()
+    bounded.phase('Serializing symmetry snapshots')
+    root=bounded.workspace()
+    if not export_brep(shape,root/'shape.brep'): raise ValueError('Could not snapshot the CAD for symmetry.')
+    np.savez(root/'reference.npz',vertices=np.asarray(reference.vertices),faces=np.asarray(getattr(reference,'faces',[]),dtype=int).reshape(-1,3))
+    return bounded.stage('nurb.symmetry','_snapshot_job',root=str(root),options=asdict(options),evidence_identity=evidence_identity,metadata=metadata,source_files=source_files,landmarks=landmarks)
 
 
-def _worker(root):
+def _snapshot_job(root,options,evidence_identity,metadata=None,source_files=None,landmarks=None):
     import trimesh
     from build123d import import_brep
-    root = Path(root)
-    data = np.load(root / "reference.npz", allow_pickle=False)
-    reference = trimesh.Trimesh(vertices=data["vertices"], faces=data["faces"], process=False) if len(data["faces"]) else trimesh.points.PointCloud(data["vertices"])
-    options = Options(**json.loads((root / "options.json").read_text()))
-    plane = fit_plane(reference, options)
-    from .symmetry_categories import feature_centers
-    saved = json.loads((root / "landmarks.json").read_text())
-    result = {"plane": plane, "cad": cad_symmetry(import_brep(root / "shape.brep"), plane, options),
-              "feature_centers": {"cad_centers": feature_centers(saved.get("cad_centers", []), plane, options.cad_tolerance_mm),
-                                  "reference_points": feature_centers(saved.get("reference_points", []), plane, options.reference_tolerance_mm),
-                                  "unlocated_features": saved.get("unlocated_features", [])}}
-    (root / "result.json").write_text(json.dumps(result, allow_nan=False))
+    from . import bounded
+    root=Path(root)
+    bounded.phase('Loading isolated symmetry snapshots')
+    with np.load(root/'reference.npz',allow_pickle=False) as data:
+        reference=trimesh.Trimesh(vertices=data['vertices'],faces=data['faces'],process=False) if len(data['faces']) else trimesh.points.PointCloud(data['vertices'])
+    result=_measure(import_brep(root/'shape.brep'),reference,Options(**options),evidence_identity,landmarks)
+    if source_files: bounded.verify_files(source_files)
+    return {**result,**(metadata or {})}
 
 
 def source_revision(part):
@@ -347,7 +346,7 @@ def source_revision(part):
         if path.is_file() and path.suffix.lower() in (".py", ".md", ".toml", ".json", ".step", ".stp", ".brep"):
             if path.suffix.lower() == ".json":
                 try:
-                    if json.loads(path.read_text()).get("kind") == "symmetry_evidence":
+                    if json.loads(path.read_text()).get("kind") in ("symmetry_evidence", "local-section-evidence"):
                         continue
                 except (ValueError, AttributeError, UnicodeError):
                     pass
@@ -359,6 +358,33 @@ def source_revision(part):
 
 
 def command(args):
+    from . import bounded
+    if bounded.fresh(): return _command(args)
+    try:
+        result=bounded.run(lambda:bounded.stage('nurb.symmetry','_bounded_command',arguments={k:v for k,v in vars(args).items() if k!='fn'}),
+            timeout_s=args.timeout,memory_limit_mb=getattr(args,'memory_limit',2048),
+            progress=None if args.json else lambda state:print('  '+state['phase'],file=sys.stderr,flush=True))
+        if args.json and result['stdout'].strip():
+            evidence=json.loads(result['stdout'])
+            evidence['resources']=result['resources']
+            result['stdout']=json.dumps(evidence,indent=2,allow_nan=False)+'\n'
+        print(result['stdout'],end='');print(result['stderr'],end='',file=sys.stderr)
+        if result['exit_code'] is not None: raise SystemExit(result['exit_code'])
+    except (bounded.WorkError, ValueError) as exc:
+        result={'status':'unknown','reason':getattr(exc,'reason','invalid_options'),'error':str(exc),'resources':getattr(exc,'resources',{})}
+        if args.json: print(json.dumps(result))
+        else: print(str(exc),file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
+def _bounded_command(arguments):
+    from argparse import Namespace
+    from . import bounded
+    arguments.pop('fn',None)
+    return bounded.capture_command(_command,Namespace(**arguments))
+
+
+def _command(args):
     from . import builder, checks, compare
     from .cli import _resolve, project_root
     root = project_root()
@@ -377,7 +403,7 @@ def command(args):
         options = Options(axis=args.axis, reference_tolerance_mm=args.reference_tolerance,
                           cad_tolerance_mm=args.cad_tolerance, edge_step_mm=args.edge_step,
                           face_samples=args.face_samples, sample_budget=args.sample_budget,
-                          timeout_s=args.timeout, max_angle_deg=args.max_angle,
+                          timeout_s=args.timeout, max_angle_deg=args.max_angle, memory_limit_mb=getattr(args,"memory_limit",2048),
                           reference_bounds_mm=json.loads(args.bounds) if args.bounds else None)
         configurations = {name: params for name, params, _ in checks.configurations(part)}
         name = args.variant or part.stem
@@ -430,14 +456,7 @@ def command(args):
                 print(f"  {result['cad']['limitation']}")
     except (ValueError, OSError) as exc:
         if args.json:
-            print(json.dumps({"status": "unknown", "error": str(exc)}))
+            print(json.dumps({"status": "unknown", "error": str(exc), "reason": getattr(exc, "reason", "worker_failure")}))
             raise SystemExit(2) from exc
         else:
             raise SystemExit(f"  symmetry unknown: {exc}") from exc
-
-
-if __name__ == "__main__":
-    try:
-        _worker(sys.argv[1])
-    except Exception as exc:
-        print(str(exc), file=sys.stderr, flush=True); sys.exit(1)

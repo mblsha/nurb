@@ -248,6 +248,11 @@ def against(
 
     check_cancelled(stop)
     policy = mesh_policy or VerificationPolicy.for_tolerance(tolerance_mm)
+    from . import bounded
+    if part_mesh is None and not bounded.active():
+        return bounded.run(lambda: prepare_precise(shape,mesh,tolerance_mm,transform,regions,policy,feature_sections),
+            timeout_s=policy.timeout_s,memory_limit_mb=policy.memory_limit_mb,stop=stop)
+    bounded.phase('Preparing comparison surfaces')
     deadline = time.monotonic() + policy.timeout_s
     if part_mesh is None:
         part = _part_mesh(shape, tolerance_mm, policy, deadline, stop)
@@ -262,18 +267,22 @@ def against(
     moved = mesh.copy()
     moved.apply_transform(matrix)
 
+    bounded.phase('Sampling comparison surfaces')
     part_points, part_faces, part_stat_count = _sample(part)
     target_points, target_faces, target_stat_count = _sample(moved)
     part_surface = _surface(part)
     target_surface = _surface(moved)
+    bounded.phase('CAD to reference distances')
     part_d, on_target = _to_surface(part_points, target_surface, closest=True)
     check_cancelled(stop)
+    bounded.phase('Reference to CAD distances')
     target_d, on_part = _to_surface(target_points, part_surface, closest=True)
     check_cancelled(stop)
 
     # A point already known to lie on one surface is a useful directed sample of that surface. Folding nearest points back catches a local recess or boss from both directions without pretending the additional points are area-weighted statistics.
     on_part = _refinement(on_part, target_d, tolerance_mm)
     on_target = _refinement(on_target, part_d, tolerance_mm)
+    bounded.phase('Refined distances')
     part_refined_d = _to_surface(on_part, target_surface)
     target_refined_d = _to_surface(on_target, part_surface)
     part_all_points = np.concatenate((part_points, on_part))
@@ -283,6 +292,7 @@ def against(
     part_all_faces = np.concatenate((part_faces, np.full(len(on_part), -1, dtype=int)))
     target_all_faces = np.concatenate((target_faces, np.full(len(on_target), -1, dtype=int)))
 
+    bounded.phase('Comparison statistics')
     part_regions = _regions(part_all_points, part_all_d, tolerance_mm, "part_to_target")
     target_regions = _regions(target_all_points, target_all_d, tolerance_mm, "target_to_part")
     detected = bool(np.any(part_all_d > tolerance_mm) or np.any(target_all_d > tolerance_mm))
@@ -317,6 +327,7 @@ def against(
         result["provenance"] = provenance
     check_cancelled(stop)
     if regions:
+        bounded.phase('Regional distances and sections')
         result["inspection_regions"] = [
             _inspect_region(
                 shape,
@@ -857,3 +868,40 @@ def _to_surface(points, surface, closest=False):
     if closest:
         return out, nearest_points
     return out
+
+
+def prepare_precise(shape,mesh,tolerance_mm,transform,regions,policy,feature_sections=False,envelope=None,source_files=None):
+    """The only inherited-kernel operations are snapshot copies and B-rep export."""
+    import pickle
+    import uuid
+    from dataclasses import asdict
+    from build123d import export_brep
+    from . import bounded
+    bounded.phase('Serializing comparison snapshots')
+    root=bounded.workspace();prefix=uuid.uuid4().hex
+    shape_file=root/(prefix+'.brep');mesh_file=root/(prefix+'.mesh')
+    if not export_brep(shape,shape_file): raise ValueError('Could not snapshot the CAD for verification.')
+    with mesh_file.open('wb') as stream: pickle.dump(mesh,stream,protocol=5)
+    components=[]
+    for index,component in enumerate(getattr(getattr(shape,'_nurb_scene',None),'components',())):
+        file=root/f'{prefix}-{index}.brep'
+        if not export_brep(component.solid,file): raise ValueError('Could not snapshot an assembly component.')
+        components.append({'id':component.id,'label':component.label,'file':str(file)})
+    return bounded.stage('nurb.compare','_precise_job',shape_file=str(shape_file),mesh_file=str(mesh_file),components=components,
+        tolerance_mm=tolerance_mm,transform=transform,regions=regions,policy=asdict(policy),feature_sections=feature_sections,
+        envelope=envelope,source_files=source_files)
+
+
+def _precise_job(shape_file,mesh_file,components,tolerance_mm,transform,regions,policy,feature_sections,envelope=None,source_files=None):
+    import pickle
+    from types import SimpleNamespace
+    from build123d import import_brep
+    from . import bounded
+    from .meshing import VerificationPolicy
+    bounded.phase('Loading isolated CAD snapshots')
+    shape=import_brep(shape_file)
+    if components: shape._nurb_scene=SimpleNamespace(components=[SimpleNamespace(id=c['id'],label=c['label'],solid=import_brep(c['file'])) for c in components])
+    with open(mesh_file,'rb') as stream: mesh=pickle.load(stream)
+    metrics=against(shape,mesh,tolerance_mm,transform,regions,mesh_policy=VerificationPolicy(**policy),feature_sections=feature_sections)
+    if source_files: bounded.verify_files(source_files)
+    return {**envelope,'metrics':metrics} if envelope is not None else metrics

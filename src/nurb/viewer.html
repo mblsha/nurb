@@ -755,6 +755,8 @@
           <label>CAD sample budget <input id="symmetrybudget" type="number" min="100" max="100000" step="100" value="20000"></label>
           <label>Fit search angle (degrees) <input id="symmetryangle" type="number" min="1" max="45" value="15"></label>
           <label>Time budget (seconds) <input id="symmetryseconds" type="number" min="1" max="120" value="30"></label>
+          <label>Child RSS limit (MiB) <input id="symmetrymemory" type="number" min="32" max="32768" step="128" value="2048"></label>
+          <p>The deadline covers snapshots, fitting and all CAD distances. macOS/Linux monitor child RSS every 50 ms; short allocation overshoot is possible.</p>
           <p>The fit is a local search near the chosen axis. Select a symmetric region to exclude cloth or scan artifacts. The CAD check always covers the complete finished model.</p>
         </details>
         <button id="symmetryrun">Fit plane and check CAD</button> <button id="symmetrycancel" disabled>Cancel</button>
@@ -792,9 +794,10 @@
           <label>Requested mesh deflection (mm) <input id="verifyaccuracy" type="number" min="0.0001" step="0.001" placeholder="automatic from tolerance"></label>
           <label>Smallest important feature (mm) <input id="verifyfeature" type="number" min="0.001" step="0.01" placeholder="optional"></label>
           <label>Time budget (seconds) <input id="verifyseconds" type="number" min="1" max="120" value="30"></label>
+          <label>Child RSS limit (MiB) <input id="verifymemory" type="number" min="32" max="32768" step="128" value="2048"></label>
           <label>Triangle budget <input id="verifytriangles" type="number" min="1000" max="5000000" step="1000" value="1000000"></label>
           <button id="verifyrun">Run precise verification</button><button id="verifycancel" disabled>Cancel</button>
-          <p>The triangle budget limits accepted output; it does not limit the CAD kernel’s peak memory.</p>
+          <p>The deadline covers snapshot preparation and all measurements. macOS/Linux monitor child RSS every 50 ms; short allocation overshoot is possible. Triangle limits only bound accepted output.</p>
           <div id="verifystatus" role="status"></div><div id="verifyresult"></div>
         </details>
         <div id="comparemetricscope"><b id="comparemetricstitle">Whole model</b> <button id="comparewhole" hidden>Whole model</button></div>
@@ -2058,8 +2061,11 @@ function verificationShow(entry) {
   const policy=state.provenance;
   if (policy) {
     add(`Requested deflection ${policy.absolute_deflection_mm} mm; budget ${policy.timeout_s} s / ${Number(policy.max_triangles).toLocaleString()} triangles.`);
+    if (policy.memory) add(`RSS limit ${policy.memory.limit_mb} MiB: ${policy.memory.enforcement}. ${policy.memory.limitation}`);
     for (const warning of policy.warnings || []) add(warning);
   }
+  if (state.resources) add(`Phase: ${state.resources.phase || state.phase}; peak sampled child RSS ${state.resources.peak_rss_mb == null ? 'not recorded' : Number(state.resources.peak_rss_mb).toFixed(1)+' MiB'}.`);
+  if (entry.target.last_verification && state.status!=='measured') add('The last completed result is retained separately. It is not the result of this request. The live display estimate is unchanged.');
   if (state.status === 'measured' && state.metrics) {
     for (const [key,label] of [['part','CAD → reference'],['target','reference → CAD']]) {
       const result=state.metrics[key];
@@ -2067,7 +2073,7 @@ function verificationShow(entry) {
     }
     add(state.metrics.detected_above_tolerance ? 'Sampled deviations exceed the accepted tolerance.' : 'No sampled deviation exceeds the accepted tolerance. Check every functional feature.');
     add('Meshing deflection and sampled distances do not certify physical fit or an exact error bound.');
-  } else if (['unknown','stale','cancelled'].includes(state.status)) add('No current precise measurement is available. Previous results are discarded.');
+  } else if (['unknown','stale','cancelled'].includes(state.status)) add('No precise measurement was produced for this request.');
 }
 function verificationLanded(message) {
   const entry=parts.get(message.name);
@@ -2085,10 +2091,11 @@ document.getElementById('verifycancel').onclick = () => {
 document.getElementById('verifyrun').onclick = () => {
   if (!sock || sock.readyState !== WebSocket.OPEN || !current) return;
   const read=id=>document.getElementById(id).value.trim();
-  const message={type:'target_verify',name:current,timeout_s:Number(read('verifyseconds')),max_triangles:Number(read('verifytriangles'))};
+  const message={type:'target_verify',name:current,timeout_s:Number(read('verifyseconds')),max_triangles:Number(read('verifytriangles')),memory_limit_mb:Number(read('verifymemory'))};
   if (read('verifyaccuracy')) message.accuracy_mm=Number(read('verifyaccuracy'));
   if (read('verifyfeature')) message.feature_size_mm=Number(read('verifyfeature'));
   const entry=parts.get(current);
+  if (entry.target.verification?.status==='measured') entry.target.last_verification=entry.target.verification;
   entry.target.verification={status:'queued',phase:'Requesting verification',token:entry.token};
   verificationShow(entry); sock.send(JSON.stringify(message));
 };
@@ -4900,7 +4907,7 @@ function symmetryOptions(entry) {
   const region = (entry?.target?.regions || []).find(r => r.name === symmetryElement('symmetryregion').value);
   return {axis:symmetryElement('symmetryaxis').value, reference_tolerance_mm:number('symmetryreftol'),
     cad_tolerance_mm:number('symmetrycadtol'), edge_step_mm:number('symmetrystep'), face_samples:number('symmetryfaces'),
-    sample_budget:number('symmetrybudget'), timeout_s:number('symmetryseconds'), max_angle_deg:number('symmetryangle'),
+    sample_budget:number('symmetrybudget'), timeout_s:number('symmetryseconds'), memory_limit_mb:number('symmetrymemory'), max_angle_deg:number('symmetryangle'),
     reference_bounds_mm:region?.bounds_mm || null};
 }
 function symmetryClearPlane() {
@@ -4963,6 +4970,8 @@ function symmetryPanel(entry) {
   symmetryElement('symmetrystatus').textContent = stale ? 'Evidence is stale. The model, alignment, source, feature records, or thresholds changed; save edits and run it again.'
     : report?.error || (running ? report.phase || 'Verifying symmetry…' : report ? `Symmetry evidence: ${report.status}` : 'Choose an approximate normal and run the check. Coordinates use the current reference alignment.');
   const result = symmetryElement('symmetryresult'); result.replaceChildren();
+  if (report?.resources) { const note=document.createElement('p');note.textContent=`${report.resources.phase}: peak sampled child RSS ${report.resources.peak_rss_mb == null ? 'not recorded' : Number(report.resources.peak_rss_mb).toFixed(1)+' MiB'}; limit ${report.resources.memory?.limit_mb || 'unavailable'} MiB.`;result.append(note); }
+  if (entry?.last_symmetry && !fresh) { const note=document.createElement('p');note.textContent='The last completed symmetry result is retained separately; it does not establish the outcome of this request.';result.append(note); }
   if (fresh) {
     const p = report.plane, cad = report.cad, fixed = value => Number.isFinite(value) ? value.toFixed(4) : 'unknown';
     const text = (value, tag='p') => { const node = document.createElement(tag); node.textContent = value; result.append(node); };
@@ -5004,6 +5013,7 @@ symmetryElement('symmetryrun').onclick = () => {
   const request = {type:'target_symmetry',name:current,options};
   if (source?.data) request.cloud = source;
   else if (source) Object.assign(request,source);
+  const previous=symmetryReports.get(current) || entry.symmetry;if(previous?.status==='measured') entry.last_symmetry=previous;
   symmetryReports.set(current,{status:'running',token:entry.token,phase:'Starting symmetry verification…'});
   symmetryRequests.set(current,{options,source}); symmetryPanel(entry); sock.send(JSON.stringify(request));
 };
@@ -5033,7 +5043,7 @@ symmetryElement('symmetryunits').onchange = () => {
   const source = symmetrySources.get(current); if (source) source.units = symmetryElement('symmetryunits').value;
   symmetryReports.delete(current); const entry=parts.get(current); if(entry) delete entry.symmetry; symmetryPanel(entry);
 };
-for (const id of ['symmetryaxis','symmetryreftol','symmetrycadtol','symmetryregion','symmetrystep','symmetryfaces','symmetrybudget','symmetryangle','symmetryseconds','symmetryshow']) symmetryElement(id).onchange = () => symmetryPanel(parts.get(current));
+for (const id of ['symmetryaxis','symmetryreftol','symmetrycadtol','symmetryregion','symmetrystep','symmetryfaces','symmetrybudget','symmetryangle','symmetryseconds','symmetrymemory','symmetryshow']) symmetryElement(id).onchange = () => symmetryPanel(parts.get(current));
 symmetryElement('symmetrypreview').onclick = () => {
   const report=symmetryReports.get(current) || parts.get(current)?.symmetry;
   if (!symmetryFresh(parts.get(current),report)) return;

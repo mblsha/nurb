@@ -186,19 +186,14 @@ def test_cli_exports_json_and_svg_from_requested_verification_mesh(tmp_path, mon
 
     part, _, _ = project(tmp_path)
     monkeypatch.chdir(tmp_path)
-    policies = []
-    def verified(shape, policy, stop=None):
-        policies.append(policy)
-        return trimesh.creation.box(extents=[10, 10, 6])
-    monkeypatch.setattr(meshing, "verification_mesh", verified)
     destination = tmp_path / "evidence"
     cli.main(["compare", "thing", "--json", "--sections-output", str(destination), "--mesh-accuracy", ".004",
-              "--mesh-timeout", "2", "--mesh-triangles", "1200", "--feature-size", ".5"])
+              "--mesh-timeout", "30", "--mesh-triangles", "1200", "--feature-size", ".5"])
     result = json.loads(capsys.readouterr().out)["comparisons"][0]
-    assert len(policies) == 1
-    assert policies[0].accuracy_mm == .004
-    assert policies[0].max_triangles == 1200 and 0 < policies[0].timeout_s <= 2
-    assert policies[0].feature_size_mm == .3  # A coarser request cannot erase the saved small lip.
+    assert result["provenance"]["absolute_deflection_mm"] == .004
+    assert result["provenance"]["max_triangles"] == 1200
+    assert result["provenance"]["timeout_s"] == 30
+    assert result["provenance"]["feature_size_mm"] == .3  # A coarser request cannot erase the saved small lip.
     assert len(result["section_exports"]) == 4
     payload = json.loads(next(destination.glob("*.json")).read_text())
     assert payload["kind"] == "local-section-evidence"
@@ -217,17 +212,16 @@ def test_cli_exports_json_and_svg_from_requested_verification_mesh(tmp_path, mon
 
 
 def test_cli_section_export_never_falls_back_after_verification_timeout(tmp_path, monkeypatch, capsys):
-    from nurb import meshing
     project(tmp_path)
     monkeypatch.chdir(tmp_path)
-    def fail(*args, **kwargs):
-        raise meshing.MeshingError("Verification unknown: timeout")
-    monkeypatch.setattr(meshing, "verification_mesh", fail)
     destination = tmp_path / "failed"
-    cli.main(["compare", "thing", "--json", "--sections-output", str(destination)])
+    with pytest.raises(SystemExit) as error:
+        cli.main(["compare", "thing", "--json", "--sections-output", str(destination), "--mesh-timeout", ".001"])
+    assert error.value.code == 2
     result = json.loads(capsys.readouterr().out)
     assert result["comparisons"] == []
     assert result["skipped"][0]["status"] == "unknown"
+    assert result["skipped"][0]["failure"] == "timeout"
     assert not destination.exists()
 
 
@@ -267,18 +261,25 @@ def test_feature_export_rejects_source_edits_before_watcher_rebuild(tmp_path):
 
 
 def test_cli_rejects_reference_changes_during_section_measurement(tmp_path, monkeypatch, capsys):
-    from nurb import meshing
+    from nurb import bounded
     project(tmp_path)
     monkeypatch.chdir(tmp_path)
-    def changed(shape, policy, stop=None):
-        reference = tmp_path / "scan.stl"
-        reference.write_bytes(reference.read_bytes()+b"changed")
-        return trimesh.creation.box(extents=[10, 10, 6])
-    monkeypatch.setattr(meshing, "verification_mesh", changed)
+    original_run = bounded.run
+    mutated = []
+    def run(function, **options):
+        def change(state):
+            if state['phase'] == 'Absolute CAD meshing' and not mutated:
+                reference = tmp_path / 'scan.stl'
+                reference.write_bytes(reference.read_bytes()+b'changed')
+                mutated.append(True)
+        options['progress'] = change
+        return original_run(function, **options)
+    monkeypatch.setattr(bounded, 'run', run)
     cli.main(["compare", "thing", "--json", "--sections-output", str(tmp_path / "output")])
     result = json.loads(capsys.readouterr().out)
+    assert mutated
     assert result["comparisons"] == []
-    assert "reference changed" in result["skipped"][0]["reason"]
+    assert 'changed' in result["skipped"][0]["reason"]
     assert not (tmp_path / "output").exists()
 
 
@@ -291,7 +292,7 @@ def test_section_export_filename_normalization_cannot_collide():
 def test_server_precise_verification_keeps_smallest_saved_feature_scale(tmp_path, monkeypatch):
     _, server, _ = project(tmp_path)
     policies = []
-    async def capture(path, request, policy, client, stopped):
+    async def capture(path, request, policy, client, stopped, deadline=None):
         policies.append(policy)
     monkeypatch.setattr(server, "_verify_target", capture)
     async def run():

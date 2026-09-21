@@ -5,23 +5,14 @@ Display meshes are reused for interactive feedback. Verification runs OCCT in a 
 
 from dataclasses import dataclass
 import math
-import os
 from pathlib import Path
-import subprocess
 import sys
-import tempfile
-import time
 
 DEFAULT_TIMEOUT_S = 30.0
 DEFAULT_MAX_TRIANGLES = 1_000_000
 
 
-class MeshingError(ValueError):
-    """Verification could not produce evidence within its declared policy."""
-
-
-class VerificationCancelled(MeshingError):
-    """The requested verification was stopped and has no current result."""
+from .bounded import WorkError as MeshingError, WorkCancelled as VerificationCancelled
 
 
 def check_cancelled(stop):
@@ -35,8 +26,11 @@ class VerificationPolicy:
     timeout_s: float = DEFAULT_TIMEOUT_S
     max_triangles: int = DEFAULT_MAX_TRIANGLES
     feature_size_mm: float | None = None
+    memory_limit_mb: int = 2048
 
     def __post_init__(self):
+        from .bounded import memory_policy
+        memory_policy(self.memory_limit_mb)
         if not math.isfinite(self.accuracy_mm) or not 0.00001 <= self.accuracy_mm <= 1.0:
             raise ValueError("mesh accuracy must be between 0.00001 and 1 mm")
         if not math.isfinite(self.timeout_s) or not 0 < self.timeout_s <= 120:
@@ -52,6 +46,7 @@ class VerificationPolicy:
         return cls(min(0.025, tolerance_mm / 4.0) if accuracy is None else accuracy, **options)
 
     def provenance(self, tolerance_mm=None):
+        from .bounded import memory_policy
         warnings = []
         if tolerance_mm is not None and self.accuracy_mm > tolerance_mm / 4.0:
             warnings.append("Mesh accuracy exceeds one quarter of the acceptance tolerance; refine it before judging fit.")
@@ -62,6 +57,7 @@ class VerificationPolicy:
         return {
             "method": "Absolute mesh verification", "absolute_deflection_mm": self.accuracy_mm,
             "angular_deflection_rad": 0.05, "timeout_s": self.timeout_s,
+            "memory": memory_policy(self.memory_limit_mb), "deadline_scope": "snapshot preparation through final evidence",
             "max_triangles": self.max_triangles, "feature_size_mm": self.feature_size_mm,
             "warnings": warnings,
             "feature_to_deflection_ratio": None if self.feature_size_mm is None else self.feature_size_mm / self.accuracy_mm,
@@ -79,49 +75,33 @@ def display_provenance(relative_deflection=None):
 
 
 def verification_mesh(shape, policy, stop=None):
-    """Return an independently tessellated mesh, or raise without altering the shape."""
+    """Snapshot live geometry separately from the fresh OCCT analysis process."""
+    from . import bounded
+    from dataclasses import asdict
+    def prepare():
+        from build123d import export_brep
+        import uuid
+        bounded.phase('Serializing CAD snapshot')
+        source=bounded.workspace()/(uuid.uuid4().hex+'.brep')
+        if not export_brep(shape,source): raise MeshingError('Verification unknown: could not snapshot the CAD shape.')
+        if bounded.fresh(): return _mesh_job(str(source),asdict(policy))
+        return bounded.stage('nurb.meshing','_mesh_job',source=str(source),policy=asdict(policy))
+    return bounded.run(prepare,timeout_s=policy.timeout_s,memory_limit_mb=policy.memory_limit_mb,stop=stop)
+
+
+def _mesh_job(source, policy):
     import numpy as np
     import trimesh
-    from build123d import export_brep
-
-    check_cancelled(stop)
-    with tempfile.TemporaryDirectory(prefix="nurb-verify-") as directory:
-        root = Path(directory)
-        source, output = root / "source.brep", root / "mesh.npz"
-        if not export_brep(shape, source):
-            raise MeshingError("Verification unknown: could not snapshot the CAD shape.")
-        env = dict(os.environ)
-        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent) + os.pathsep + env.get("PYTHONPATH", "")
-        deadline = time.monotonic() + policy.timeout_s
-        process = subprocess.Popen(
-            [sys.executable, "-m", "nurb.meshing", str(source), str(output),
-             str(policy.accuracy_mm), str(policy.max_triangles)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
-        )
-        try:
-            while True:
-                check_cancelled(stop)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise MeshingError(f"Verification unknown: meshing exceeded {policy.timeout_s:g} seconds. Increase the time budget, relax accuracy, or verify a smaller component.")
-                try:
-                    _, stderr = process.communicate(timeout=min(0.1, remaining))
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-            check_cancelled(stop)
-            if process.returncode or not output.is_file():
-                message = stderr.strip().splitlines()[-1:] or [f"meshing process exited with code {process.returncode}"]
-                raise MeshingError(f"Verification unknown: {message[0][:500]}")
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.communicate()
-        with np.load(output, allow_pickle=False) as data:
-            vertices, faces = data["vertices"], data["faces"]
-        if not len(faces) or len(faces) > policy.max_triangles or not np.isfinite(vertices).all():
-            raise MeshingError("Verification unknown: mesher returned an empty, invalid, or over-budget surface.")
-        return trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    from . import bounded
+    policy=VerificationPolicy(**policy)
+    output=Path(source).with_suffix('.npz')
+    bounded.phase('Absolute CAD meshing')
+    _worker(source,output,policy.accuracy_mm,policy.max_triangles)
+    bounded.phase('Reading verification mesh')
+    with np.load(output,allow_pickle=False) as data: vertices,faces=data['vertices'],data['faces']
+    if not len(faces) or len(faces)>policy.max_triangles or not np.isfinite(vertices).all():
+        raise MeshingError('Verification unknown: mesher returned an empty, invalid, or over-budget surface.')
+    return trimesh.Trimesh(vertices=vertices,faces=faces,process=False)
 
 
 def _worker(source, output, accuracy, max_triangles):

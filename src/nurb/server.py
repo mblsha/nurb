@@ -16,6 +16,7 @@ import pathlib
 import re
 import secrets
 import threading
+import time
 import traceback
 import webbrowser
 
@@ -821,89 +822,78 @@ class Server:
                 target["error"] = f"{type(exc).__name__}: {exc}"
         return entry
 
-    async def _verify_target(self, path, request, policy, client, stopped):
-        """Measure a snapshot without holding the live build lock during meshing."""
+    async def _verify_target(self, path, request, policy, client, stopped, deadline=None):
+        """Snapshot and measure in one supervised child without blocking rebuilds."""
         import copy
-        from . import compare
-        from .meshing import VerificationCancelled, check_cancelled
+        from . import bounded, checks, compare
+        name=path.stem
+        response={"type":"target_verification","name":name,**request}
+        entry=self.state.get(name,{})
+        snapshot=copy.deepcopy({key:(entry.get("target") or {}).get(key) for key in ("file","units","stamp","transform","tolerance_mm","regions")})
+        overrides=copy.deepcopy(self.overrides.get(name))
+        loop=asyncio.get_running_loop()
+        async def publish_phase(resources):
+            if self.state.get(name) is entry and not stopped.is_set() and response.get("status") not in ("measured","unknown","cancelled","stale"):
+                response.update(status="running",phase=resources["phase"],resources=resources)
+                entry["target"]["verification"]=dict(response)
+                await self.reply(client,dict(response))
+        def progress(resources):
+            loop.call_soon_threadsafe(lambda:asyncio.create_task(publish_phase(resources)))
+        def analyze():
+            bounded.phase("Validating snapshot inputs")
+            target=entry.get("target") or {}
+            if not target or target.get("error") or target.get("stale"):
+                raise ValueError("attach a current, readable reference before verifying")
+            source_snapshot=self._source_snapshot(path)
+            source_set=self._build_sources(path,entry["shape"],source_snapshot)
+            source_identity=self._build_inputs(source_set,source_snapshot)
+            if self.prints.get(name)!=(source_identity,repr(sorted((overrides or {}).items())),entry.get("shape_id")):
+                raise bounded.WorkError("Model inputs changed; wait for the rebuild before verifying.","stale")
+            declared = compare.setting(checks.settings(path)) or {}
+            if (any(declared.get(key) != target.get(key) for key in ("file", "units", "tolerance_mm"))
+                    or (declared.get("regions") or []) != (target.get("regions") or [])
+                    or (declared.get("transform") is not None and declared["transform"] != target.get("transform"))):
+                raise bounded.WorkError("Reference or feature settings changed; wait for the refresh before verifying.", "stale")
+            bounded.phase("Loading reference snapshot")
+            if self._target_stamp(target["file"],target.get("units"))!=snapshot["stamp"]:
+                raise bounded.WorkError("The reference changed; wait for its refresh before verifying.","stale")
+            hit=self._target_mesh(target["file"],target.get("units"))
+            paths=set(source_set)|{path,path.with_suffix(".md"),hit["path"]}
+            stamps={str(p):bounded.file_stamp(p) for p in paths}
+            bounded.phase("Copying CAD and reference snapshots")
+            shape=copy.deepcopy(entry["shape"])
+            reference=hit["mesh"].copy()
+            identity={"token":request["token"],"reference_stamp":target["stamp"],"shape_id":entry.get("shape_id"),"build_inputs":source_identity}
+            source_files=bounded.file_identity(paths)
+            return compare.prepare_precise(shape,reference,snapshot["tolerance_mm"],snapshot["transform"],snapshot["regions"],policy,
+                envelope={"identity":identity,"stamps":stamps},source_files=source_files)
 
-        name = path.stem
-        response = {"type": "target_verification", "name": name, **request}
-        entry = self.state.get(name, {})
         try:
-            async with self.building:
-                check_cancelled(stopped.is_set)
-                if self.state.get(name) is not entry or entry.get("token") != request["token"]:
-                    raise ValueError("the model changed before verification started; run verification again")
-                target = entry.get("target")
-                if not target or target.get("error") or target.get("stale"):
-                    raise ValueError("attach a current, readable reference before verifying")
-                snapshot = copy.deepcopy({key: target.get(key) for key in ("file", "units", "stamp", "transform", "tolerance_mm", "regions")})
-                card = path.with_suffix(".md")
-                source_bytes, card_bytes = path.read_bytes(), card.read_bytes()
-                source_snapshot = self._source_snapshot(path)
-                source_set = self._build_sources(path, entry["shape"], source_snapshot)
-                source_identity = self._build_inputs(source_set, source_snapshot)
-                if source_identity is None:
-                    raise ValueError("the model source snapshot could not be read")
-                overrides_snapshot = copy.deepcopy(self.overrides.get(name))
-                built = self.prints.get(name)
-                if built != (source_identity, repr(sorted((overrides_snapshot or {}).items())), entry.get("shape_id")):
-                    raise ValueError("the model inputs changed; wait for the rebuild before verifying")
-                hit = self._target_mesh(target["file"], target.get("units"))
-                if hit["stamp"] != snapshot["stamp"]:
-                    raise ValueError("the reference changed; wait for its rebuild before verifying")
-                reference_stat = hit["path"].stat()
-                # Only this short copy touches live OCCT geometry. The verification
-                # process will mesh its own B-rep and cannot change the preview.
-                shape = copy.deepcopy(entry["shape"])
-                reference = hit["mesh"].copy()
-                response.update(status="running", phase="Meshing and measuring", provenance=policy.provenance(target["tolerance_mm"]),
-                                identity={"token": request["token"], "reference_stamp": target["stamp"],
-                                          "shape_id": entry.get("shape_id"), "build_inputs": source_identity,
-                                          "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
-                                          "card_sha256": hashlib.sha256(card_bytes).hexdigest()})
-                target["verification"] = dict(response)
-            await self.reply(client, response)
-            metrics = await asyncio.to_thread(
-                compare.against, shape, reference,
-                tolerance_mm=snapshot["tolerance_mm"], transform=snapshot["transform"],
-                regions=snapshot["regions"], mesh_policy=policy, stop=stopped.is_set,
-            )
-            check_cancelled(stopped.is_set)
-            current = self.state.get(name, {})
-            target = current.get("target") or {}
-            current_stat = hit["path"].stat()
-            if (current is not entry or current.get("token") != request["token"]
-                    or target.get("error") or target.get("stale")
-                    or any(target.get(key) != value for key, value in snapshot.items())
-                    or path.read_bytes() != source_bytes or card.read_bytes() != card_bytes
-                    or self._build_inputs(source_set, self._source_snapshot(path)) != source_identity
-                    or self.overrides.get(name) != overrides_snapshot
-                    or (current_stat.st_mtime_ns, current_stat.st_ctime_ns, current_stat.st_size)
-                       != (reference_stat.st_mtime_ns, reference_stat.st_ctime_ns, reference_stat.st_size)):
-                response.update(status="stale", phase="Superseded", error="The model or reference changed during verification; run it again.")
+            measured=await bounded.async_run(analyze,timeout_s=policy.timeout_s,memory_limit_mb=policy.memory_limit_mb,stop=stopped.is_set,progress=progress,deadline=deadline)
+            current=self.state.get(name,{})
+            target=current.get("target") or {}
+            if (current is not entry or current.get("token")!=request["token"] or target.get("stale") or target.get("error")
+                    or any(target.get(key)!=value for key,value in snapshot.items()) or self.overrides.get(name)!=overrides
+                    or any(bounded.file_stamp(p)!=stamp for p,stamp in measured["stamps"].items())):
+                response.update(status="stale",phase="Superseded",reason="stale",error="The model or reference changed during verification; run it again.")
             else:
-                response.update(status="measured", phase="Complete", metrics=metrics, provenance=metrics["provenance"])
+                metrics=measured["metrics"]
+                response.update(status="measured",phase="Complete",metrics=metrics,identity=measured["identity"],provenance=metrics["provenance"],resources=measured["resources"])
         except asyncio.CancelledError:
             stopped.set()
-            response.update(status="cancelled", phase="Stopped", error="Verification cancelled; no result was produced.")
-            response.pop("metrics", None)
+            response.update(status="cancelled",phase="Stopped",reason="cancelled",error="Verification cancelled; child stopped and reaped.")
             raise
-        except VerificationCancelled as exc:
-            response.update(status="cancelled", phase="Stopped", error=str(exc))
-            response.pop("metrics", None)
         except Exception as exc:
-            response.update(status="unknown", phase="Verification unavailable", error=f"{type(exc).__name__}: {exc}")
-            response.pop("metrics", None)
+            reason=getattr(exc,"reason","worker_failure")
+            response.update(status=reason if reason in ("cancelled","stale") else "unknown",phase={"cancelled":"Cancelled","stale":"Superseded"}.get(reason,"Verification unavailable"),reason=reason,error=str(exc),resources=getattr(exc,"resources",{}))
+            response.pop("metrics",None)
         finally:
-            current = self.state.get(name, {})
-            target = current.get("target")
-            if current is entry and current.get("token") == request["token"] and target:
-                target["verification"] = dict(response)
-            self.verifications.pop(name, None)
-            self.verification_controls.pop(name, None)
-        await self.reply(client, response)
+            current=self.state.get(name,{})
+            if current is entry and current.get("token")==request["token"] and current.get("target"):
+                current["target"]["verification"]=dict(response)
+            self.verifications.pop(name,None)
+            self.verification_controls.pop(name,None)
+        await self.reply(client,response)
 
     # ---------- target mesh ----------
 
@@ -977,6 +967,13 @@ class Server:
                 for region in declared.get("regions", []) if "feature" in region
             ]
 
+    def _target_stamp(self, file, units):
+        path = pathlib.Path(file)
+        if not path.is_absolute(): path = self.root / path
+        status = path.stat()
+        identity = f"{path.resolve()}\0{units or ''}\0{status.st_mtime_ns}\0{status.st_ctime_ns}\0{status.st_size}"
+        return hashlib.blake2b(identity.encode(), digest_size=8).hexdigest()
+
     def _target_mesh(self, file, units):
         """The loaded target, cached by the file's mtime."""
         import trimesh
@@ -992,9 +989,7 @@ class Server:
         # This stamp also versions the browser's geometry cache. The same bytes read
         # as metres and millimetres are different ghosts even though their mtime is
         # identical, and changing the card must replace the one already on screen.
-        status = path.stat()
-        identity = f"{path.resolve()}\0{units or ''}\0{status.st_mtime_ns}\0{status.st_ctime_ns}\0{status.st_size}"
-        stamp = hashlib.blake2b(identity.encode(), digest_size=8).hexdigest()
+        stamp = self._target_stamp(file, units)
         hit = self.targets.get((file, units))
         if hit and hit["stamp"] == stamp:
             return hit
@@ -1715,13 +1710,17 @@ class Server:
                     feature_size_mm=smallest_feature_size(target.get("regions", []), msg.get("feature_size_mm")),
                     timeout_s=msg.get("timeout_s", 30.0),
                     max_triangles=msg.get("max_triangles", 1_000_000),
+                    memory_limit_mb=msg.get("memory_limit_mb",2048),
                 )
+                deadline = time.monotonic() + policy.timeout_s
                 request["provenance"] = policy.provenance(target["tolerance_mm"])
+                previous=target.get("verification") or {}
+                if previous.get("status")=="measured": target["last_verification"]=previous
                 target["verification"] = {"type": "target_verification", "name": name, **request}
                 await self.reply(client, target["verification"])
                 stopped = threading.Event()
                 self.verification_controls[name] = (request, stopped)
-                self.verifications[name] = asyncio.create_task(self._verify_target(path, request, policy, client, stopped))
+                self.verifications[name] = asyncio.create_task(self._verify_target(path, request, policy, client, stopped, deadline))
             except (ValueError, TypeError, KeyError) as exc:
                 response = {"type": "target_verification", "name": name, **request,
                             "status": "unknown", "phase": "Verification unavailable", "error": str(exc)}

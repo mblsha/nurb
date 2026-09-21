@@ -130,13 +130,17 @@ def test_viewer_jobs_are_async_cancellable_and_do_not_publish_stale_distances(tm
     part = project(tmp_path)
     server = Server(tmp_path); server.queue = asyncio.Queue(); server.rebuild(part)
     messages = []
-    async def capture(message): messages.append(message)
+    started = threading.Event()
+    async def capture(message):
+        messages.append(message)
+        if message.get('resources', {}).get('phase') == 'Validating symmetry snapshot inputs': started.set()
     server.send = capture
-    started, finish = threading.Event(), threading.Event()
-    def wait(shape, reference, options, identity, stop, landmarks=None):
-        started.set(); finish.wait(5)
-        return {'status': 'measured', 'identity': identity, 'cad': {'sample_count': 1}}
-    monkeypatch.setattr(symmetry, 'run', wait)
+    import time
+    original_snapshot = server._source_snapshot
+    def wait(*args, **kwargs):
+        time.sleep(1.5)
+        return original_snapshot(*args, **kwargs)
+    monkeypatch.setattr(server, '_source_snapshot', wait)
     async def scenario():
         await server.command(json.dumps({'type': 'target_symmetry', 'name': 'thing'}))
         job = server.symmetry_jobs['thing']
@@ -153,7 +157,7 @@ def test_viewer_jobs_are_async_cancellable_and_do_not_publish_stale_distances(tm
             compare.update_card(part, regions=[{'name':'new center','component':'body','feature':{'id':'new','center_mm':[1,0,0]}}])
         else:
             (tmp_path / 'scan.ply').write_bytes(reference_mesh().export(file_type='ply') + b'\n')
-        finish.set(); await job['task']
+        await job['task']
     asyncio.run(scenario())
     assert messages[-1]['status'] == ('cancelled' if action == 'cancel' else 'stale')
     assert 'cad' not in messages[-1]
@@ -209,6 +213,9 @@ def test_server_point_cloud_upload_runs_without_replacing_attached_reference(tmp
     server.check(part)
     original_target=server.state['thing']['target']['file']
     cached_metrics=server.state['thing']['target']['metrics']
+    class MustNotCopy:
+        def __deepcopy__(self, memo): raise AssertionError('cached display metrics copied during preparation')
+    cached_metrics['unrelated_cached_payload'] = MustNotCopy()
     points=np.random.default_rng(5).uniform([.5,-4,-3],[5,4,3],(200,3))
     body=trimesh.points.PointCloud(np.vstack([points,points*[-1,1,1]])).export(file_type='ply')
     compressed=gzip.compress(body,mtime=0)
@@ -270,7 +277,7 @@ def test_symmetry_refuses_feature_edits_before_watcher_refresh(tmp_path, monkeyp
         await server.command(json.dumps({'type':'target_symmetry','name':'thing'}))
         await server.symmetry_jobs['thing']['task']
     asyncio.run(scenario())
-    assert messages[-1]['status'] == 'unknown'
+    assert messages[-1]['status'] == 'stale'
     assert 'feature settings changed' in messages[-1]['error']
     assert 'cad' not in messages[-1]
 

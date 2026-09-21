@@ -6,8 +6,9 @@ from pathlib import Path
 import secrets
 import tempfile
 import threading
+import time
 
-from . import checks, compare, scan, symmetry
+from . import bounded, checks, compare, scan, symmetry
 
 
 def _reference(server, message, target):
@@ -63,71 +64,84 @@ async def handle(server, path, message, client):
         if entry.get("shape") is None:
             raise ValueError("build a valid CAD model before checking symmetry")
         options = symmetry.Options(**message.get("options", {}))
+        deadline = time.monotonic() + options.timeout_s
         stopped = threading.Event()
         jobs[name] = {"request_id": request_id, "token": token, "stop": stopped}
+        previous=entry.get("symmetry") or {}
+        if previous.get("status")=="measured": entry["last_symmetry"]=previous
         entry["symmetry"] = {**base, "status": "running", "phase": "Fitting the reference plane and checking trimmed CAD"}
         await server.reply(client, entry["symmetry"])
-        jobs[name]["task"] = asyncio.create_task(_job(server, path, message, options, base, entry, stopped, client))
+        jobs[name]["task"] = asyncio.create_task(_job(server, path, message, options, base, entry, stopped, client, deadline))
     except (TypeError, ValueError) as exc:
         await server.reply(client, {**base, "status": "unknown", "error": str(exc)})
 
 
-async def _job(server, path, message, options, base, entry, stopped, client):
-    result = {**base, "status": "unknown"}
-    name = path.stem
+async def _job(server, path, message, options, base, entry, stopped, client, deadline=None):
+    result={**base,"status":"running"}
+    name=path.stem
+    target=copy.deepcopy({key:(entry.get("target") or {}).get(key) for key in ("file","units","stamp","transform","content_id","regions")})
+    overrides=copy.deepcopy(server.overrides.get(name) or {})
+    configuration={"name":entry.get("variant") or "default","parameters":{p["name"]:p["value"] for p in entry.get("params",[])}}
+    transform=target.get("transform") or compare.IDENTITY
+    loop=asyncio.get_running_loop()
+    async def publish_phase(resources):
+        if server.state.get(name) is entry and not stopped.is_set() and result.get("status")=="running":
+            result.update(phase=resources["phase"],resources=resources)
+            entry["symmetry"]=dict(result)
+            await server.reply(client,dict(result))
+    def progress(resources):
+        loop.call_soon_threadsafe(lambda:asyncio.create_task(publish_phase(resources)))
+    def analyze():
+        bounded.phase("Validating symmetry snapshot inputs")
+        snapshot=server._source_snapshot(path)
+        built=server._build_inputs(server._build_sources(path,entry["shape"],snapshot),snapshot)
+        if server.prints.get(name)!=(built,repr(sorted(overrides.items())),entry.get("shape_id")):
+            raise bounded.WorkError("Model inputs changed; wait for the rebuild before checking symmetry.","stale")
+        declared = compare.setting(checks.settings(path)) or {}
+        if (any(declared.get(key) != target.get(key) for key in ("file", "units"))
+                or (declared.get("regions") or []) != (target.get("regions") or [])
+                or (declared.get("transform") is not None and declared["transform"] != target.get("transform"))):
+            raise bounded.WorkError("Reference or feature settings changed; wait for rebuilding before checking symmetry.", "stale")
+        bounded.phase("Loading symmetry reference snapshot")
+        source,units=_reference(server,message,target)
+        revision=symmetry.source_revision(path)
+        if not message.get("cloud") and not message.get("reference_file"):
+            if server._target_stamp(target["file"],target.get("units"))!=target.get("stamp"):
+                raise bounded.WorkError("The attached reference changed; wait for its refresh and run symmetry again.","stale")
+        reference,unit,reference_id=symmetry.reference_snapshot(source,units)
+        reference.apply_transform(compare._transform(transform))
+        bounded.phase("Copying and identifying finished CAD")
+        shape=copy.deepcopy(entry["shape"])
+        from .symmetry_categories import landmarks
+        locations = landmarks(target.get("regions") or [], transform)
+        contract=symmetry.identity(shape,reference_id,transform,configuration,revision,options,locations)
+        relative=source.relative_to(server.root).as_posix() if source.is_relative_to(server.root) else source.name
+        metadata={"source_revision":revision,"configuration":configuration,"reference_file":relative,"reference_units":unit,
+                  "reference_kind":"independent" if message.get("cloud") or message.get("reference_file") else "attached","alignment":list(transform)}
+        metadata["feature_records"] = [[r["name"], r["feature"]] for r in target.get("regions") or [] if "feature" in r]
+        source_files=bounded.file_identity(set(server._build_sources(path,entry["shape"],snapshot))|{path,path.with_suffix('.md'),source})
+        return symmetry.prepare(shape,reference,options,contract,metadata,source_files,landmarks=locations)
+
     try:
-        async with server.building:
-            if server.state.get(name) is not entry:
-                raise ValueError("the model changed before symmetry verification started; try again")
-            snapshot = server._source_snapshot(path)
-            built = server._build_inputs(server._build_sources(path, entry["shape"], snapshot), snapshot)
-            overrides = copy.deepcopy(server.overrides.get(name) or {})
-            if server.prints.get(name) != (built, repr(sorted(overrides.items())), entry.get("shape_id")):
-                raise ValueError("model inputs changed; wait for the rebuild before checking symmetry")
-            shape = copy.deepcopy(entry["shape"])
-            target = copy.deepcopy(entry.get("target") or {})
-            declared = compare.setting(checks.settings(path)) or {}
-            if (any(declared.get(key, []) != target.get(key, []) for key in ("file", "units", "regions"))
-                    or (declared.get("transform") is not None and declared["transform"] != target.get("transform"))):
-                raise ValueError("reference or feature settings changed; wait for rebuilding before checking symmetry")
-            configuration = {"name": entry.get("variant") or "default", "parameters": {p["name"]: p["value"] for p in entry.get("params", [])}}
-            transform = target.get("transform") or compare.IDENTITY
-            source, units = await asyncio.to_thread(_reference, server, message, target)
-            revision = symmetry.source_revision(path)
-        def analyze():
-            if not message.get("cloud") and not message.get("reference_file"):
-                if server._target_mesh(target["file"], target.get("units"))["stamp"] != target.get("stamp"):
-                    raise ValueError("the attached reference changed; wait for its refresh and run symmetry again")
-            reference, unit, reference_id = symmetry.reference_snapshot(source, units)
-            reference.apply_transform(compare._transform(transform))
-            from .symmetry_categories import landmarks
-            locations = landmarks(target.get("regions", []), transform)
-            contract = symmetry.identity(shape, reference_id, transform, configuration, revision, options, locations)
-            measured = symmetry.run(shape, reference, options, contract, stopped.is_set, landmarks=locations)
-            return measured, unit, reference_id
-        measured, unit, reference_id = await asyncio.to_thread(analyze)
-        current = server.state.get(name) or {}
-        current_target = current.get("target") or {}
-        current_configuration = {"name": current.get("variant") or "default", "parameters": {p["name"]: p["value"] for p in current.get("params", [])}}
-        if (current is not entry or current.get("token") != base["token"] or stopped.is_set()
-                or current_configuration != configuration or server.overrides.get(name, {}) != overrides
-                or (current_target.get("transform") or compare.IDENTITY) != transform
-                or any(current_target.get(k) != target.get(k) for k in ("file", "units", "content_id", "stamp", "regions"))
-                or symmetry.source_revision(path) != revision or symmetry.reference_identity(source, unit) != reference_id):
-            result.update(status="cancelled" if stopped.is_set() else "stale", error="Symmetry evidence was cancelled or its inputs changed; run it again.")
-        else:
-            relative = source.relative_to(server.root).as_posix() if source.is_relative_to(server.root) else source.name
-            result.update(measured, source_revision=revision, reference_kind="independent" if message.get("cloud") or message.get("reference_file") else "attached", configuration=configuration, reference_file=relative, reference_units=unit, alignment=list(transform),
-                          feature_records=[[r["name"], r["feature"]] for r in target.get("regions", []) if "feature" in r])
+        measured=await bounded.async_run(analyze,timeout_s=options.timeout_s,memory_limit_mb=options.memory_limit_mb,
+                                         stop=stopped.is_set,progress=progress,deadline=deadline)
+        current=server.state.get(name) or {}
+        current_target=current.get("target") or {}
+        current_configuration = {"name":current.get("variant") or "default","parameters":{p["name"]:p["value"] for p in current.get("params",[])}}
+        if (current is not entry or current.get("token")!=base["token"] or server.overrides.get(name,{})!=overrides
+                or current_configuration != configuration
+                or any(current_target.get(k)!=target.get(k) for k in ("file","units","stamp","transform","content_id","regions"))):
+            result.update(status="stale",reason="stale",error="The model or reference changed during symmetry verification; run it again.")
+        else: result.update(measured,phase="Complete")
     except asyncio.CancelledError:
-        stopped.set(); raise
+        stopped.set();result.update(status="cancelled",reason="cancelled",error="Symmetry cancelled; child stopped and reaped.");raise
     except Exception as exc:
-        result.update(status="cancelled" if stopped.is_set() else "unknown", error=str(exc))
+        reason=getattr(exc,"reason","worker_failure")
+        result.update(status=reason if reason in ("stale","cancelled") else "unknown",reason=reason,error=str(exc),resources=getattr(exc,"resources",{}))
     finally:
-        if server.state.get(name) is entry:
-            entry["symmetry"] = result
-        server.symmetry_jobs.pop(name, None)
-    await server.reply(client, result)
+        if server.state.get(name) is entry: entry["symmetry"]=result
+        server.symmetry_jobs.pop(name,None)
+    await server.reply(client,result)
 
 
 def changed(server, paths):

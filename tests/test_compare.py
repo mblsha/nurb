@@ -852,19 +852,21 @@ def test_precise_verification_returns_without_blocking_commands_and_rejects_a_re
     server.queue = asyncio.Queue()
     path = tmp_path / "parts" / "thing.py"
     original = server.rebuild(path)
-    started, release = threading.Event(), threading.Event()
+    started = threading.Event()
     sent = []
 
     async def capture(payload):
         sent.append(dict(payload))
+        if payload.get("resources", {}).get("phase") == "Validating snapshot inputs": started.set()
 
+    import time
+    original_snapshot = server._source_snapshot
     def held(*args, **kwargs):
-        started.set()
-        assert release.wait(5)
-        return {"provenance": {"method": "Absolute mesh verification"}}
+        time.sleep(1.5)
+        return original_snapshot(*args, **kwargs)
 
     server.send = capture
-    monkeypatch.setattr(compare, "against", held)
+    monkeypatch.setattr(server, "_source_snapshot", held)
 
     async def exercise():
         await server.command(json.dumps({"type": "target_verify", "name": "thing", "feature_size_mm": 0.3}))
@@ -875,7 +877,6 @@ def test_precise_verification_returns_without_blocking_commands_and_rejects_a_re
         assert sent[1]["status"] == "running"
         assert sent[1]["token"] == original["token"]
         server.rebuild(path)
-        release.set()
         await task
 
     asyncio.run(exercise())
@@ -900,7 +901,7 @@ def test_precise_verification_failure_replaces_old_evidence_without_replacing_li
         raise MeshingError("Verification unknown: meshing exceeded its budget")
 
     server.send = capture
-    monkeypatch.setattr(compare, "against", failed)
+    monkeypatch.setattr(compare, "prepare_precise", failed)
 
     async def exercise():
         await server.command(json.dumps({"type": "target_verify", "name": "thing"}))
@@ -911,6 +912,7 @@ def test_precise_verification_failure_replaces_old_evidence_without_replacing_li
     assert sent[-1]["status"] == "unknown"
     assert "metrics" not in entry["target"]["verification"]
     assert entry["target"]["metrics"] == {"display": "kept"}
+    assert entry["target"]["last_verification"]["metrics"] == {"stale": True}
     assert not server.verifications
 
 
@@ -920,6 +922,7 @@ def test_absolute_cli_evidence_names_accuracy_and_feature_budget(tmp_path, monke
     cli.main(["compare", "thing", "--json", "--mesh-accuracy", "0.02", "--feature-size", "0.3"])
     result = json.loads(capsys.readouterr().out)["comparisons"][0]
     assert result["status"] == "measured"
+    assert len(result["source_revision"]) == 64
     assert result["provenance"]["absolute_deflection_mm"] == 0.02
     assert result["provenance"]["feature_size_mm"] == 0.3
     assert result["provenance"]["cad_triangles"] == 12
@@ -956,7 +959,9 @@ def test_precise_verification_real_worker_finishes_and_keeps_preview_estimate(tm
         await server.verifications["thing"]
 
     asyncio.run(exercise())
-    assert [item["status"] for item in sent] == ["queued", "running", "measured"]
+    assert sent[0]["status"] == "queued" and sent[-1]["status"] == "measured"
+    assert all(item["status"] == "running" for item in sent[1:-1])
+    assert sent[-1]["resources"]["memory"]["enforcement"] == "child RSS monitor"
     assert sent[-1]["metrics"]["provenance"]["cad_triangles"] == 12
     assert sent[-1]["identity"]["shape_id"] == entry["shape_id"]
     assert sent[-1]["identity"]["build_inputs"]
@@ -966,14 +971,16 @@ def test_precise_verification_real_worker_finishes_and_keeps_preview_estimate(tm
 def test_cli_timeout_is_unknown_and_has_no_comparison_numbers(tmp_path, monkeypatch, capsys):
     project(tmp_path)
     monkeypatch.chdir(tmp_path)
-    cli.main(["compare", "thing", "--json", "--mesh-timeout", "0.001"])
+    with pytest.raises(SystemExit) as error:
+        cli.main(["compare", "thing", "--json", "--mesh-timeout", "0.001"])
+    assert error.value.code == 2
     result = json.loads(capsys.readouterr().out)
     assert result["comparisons"] == []
     assert result["skipped"][0]["status"] == "unknown"
-    assert "meshing exceeded" in result["skipped"][0]["reason"]
+    assert result["skipped"][0]["failure"] == "timeout"
 
 
-@pytest.mark.parametrize("changed", ["source", "reference", "sliders"])
+@pytest.mark.parametrize("changed", ["source", "reference", "sliders", "card"])
 def test_verification_refuses_inputs_that_changed_before_the_rebuild(tmp_path, monkeypatch, changed):
     server = project(tmp_path)
     server.queue = asyncio.Queue()
@@ -983,6 +990,8 @@ def test_verification_refuses_inputs_that_changed_before_the_rebuild(tmp_path, m
         path.write_text(PART.replace("width=40.0", "width=45.0"))
     elif changed == "reference":
         trimesh.creation.box(extents=[45, 30, 10]).export(tmp_path / "scans" / "original.stl")
+    elif changed == "card":
+        compare.update_card(path, tolerance_mm=.02)
     else:
         server.overrides["thing"] = {"width": 45.0}
     sent = []
@@ -998,15 +1007,14 @@ def test_verification_refuses_inputs_that_changed_before_the_rebuild(tmp_path, m
         await server.verifications["thing"]
 
     asyncio.run(exercise())
-    assert sent[-1]["status"] == "unknown"
-    assert "rebuild" in sent[-1]["error"]
+    assert sent[-1]["status"] == "stale"
+    assert sent[-1]["reason"] == "stale"
     assert "metrics" not in sent[-1]
 
 
 def test_cancel_verification_requires_matching_request_and_produces_no_metrics(tmp_path, monkeypatch):
     import threading
     import time
-    from nurb.meshing import check_cancelled
     server = project(tmp_path)
     server.queue = asyncio.Queue()
     entry = server.rebuild(tmp_path / "parts" / "thing.py")
@@ -1015,15 +1023,15 @@ def test_cancel_verification_requires_matching_request_and_produces_no_metrics(t
 
     async def capture(payload):
         sent.append(dict(payload))
+        if payload.get("resources", {}).get("phase") == "Validating snapshot inputs": started.set()
 
-    def held(*args, stop, **kwargs):
-        started.set()
-        while not stop():
-            time.sleep(0.01)
-        check_cancelled(stop)
+    original_snapshot = server._source_snapshot
+    def held(*args, **kwargs):
+        time.sleep(2)
+        return original_snapshot(*args, **kwargs)
 
     server.send = capture
-    monkeypatch.setattr(compare, "against", held)
+    monkeypatch.setattr(server, "_source_snapshot", held)
 
     async def exercise():
         await server.command(json.dumps({"type": "target_verify", "name": "thing"}))
@@ -1038,7 +1046,9 @@ def test_cancel_verification_requires_matching_request_and_produces_no_metrics(t
         await task
 
     asyncio.run(exercise())
-    assert [response["status"] for response in sent] == ["queued", "running", "cancelling", "cancelled"]
+    assert sent[0]["status"] == "queued"
+    assert sent[-1]["status"] == "cancelled"
+    assert "cancelling" in [response["status"] for response in sent]
     assert "metrics" not in sent[-1]
     assert entry["target"]["verification"]["status"] == "cancelled"
     assert not server.verifications
