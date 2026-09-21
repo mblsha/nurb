@@ -741,7 +741,7 @@
         <p>Restoring a setup changes the displayed parameters and preview alignment. It does not rewrite the model or card. Changed inputs are labeled stale; saving a new setup records a new baseline.</p>
       </details>
       <details id="symmetrypanel"><summary>Symmetry evidence</summary>
-        <p>Fit the reference plane, then check both sides of the finished CAD, including trimmed faces and hole edges. The reference coordinates and bytes stay unchanged.</p>
+        <p>Fit the reference plane, then check finished faces, hole edges, authored feature centers and periodic seams separately. Add known centers in Named inspection regions. The reference coordinates and bytes stay unchanged.</p>
         <div id="symmetrysource"></div><button id="symmetrycloud">Choose point cloud…</button> <button id="symmetryattached">Use attached reference</button>
         <label>Point cloud source units <select id="symmetryunits"><option>mm</option><option>cm</option><option>m</option><option>in</option></select></label>
         <input id="symmetryfile" type="file" accept=".ply,.ply.gz" hidden>
@@ -830,6 +830,9 @@
             <label>Orientation <input id="featureorientation" placeholder="narrow end, facing the headset"></label>
             <label>Reference annotation X Y Z (mm) <input id="featurepoint" placeholder="optional source-frame point"></label>
             <button id="featurelocate" type="button">Locate reference annotation</button>
+            <label>CAD center X Y Z (mm) <input id="featurecenter" placeholder="optional authored center in part frame"></label>
+            <label>Symmetry pair group <input id="featuresymmetrygroup" placeholder="optional, otherwise uses role"></label>
+            <p>Symmetry checks pair explicit centers within the same group. These are authored locations, not centers extracted from CAD. Leave unknown centers blank.</p>
             <label>Required features, one per line <textarea id="featurerequired" rows="2" placeholder="small inverse-T lip"></textarea></label>
             <label>Excluded features, one per line <textarea id="featureexcluded" rows="2" placeholder="nose cloth"></textarea></label>
             <label>Smallest important feature (mm) <input id="featuresize" type="number" min="0.000001" step="0.01" placeholder="unknown"></label>
@@ -1888,10 +1891,13 @@ function featureRegionValues(region) {
   if (!featureField('enabled').checked) return region;
   const previous = selectedFeatureRegion()?.feature;
   const feature = {...previous, id: previous?.id || crypto.randomUUID()};
-  for (const key of ['role','configuration','orientation','notes']) feature[key] = featureField(key).value.trim();
+  for (const key of ['role','configuration','orientation','notes','symmetry_group']) feature[key] = featureField(key.replace('_','')).value.trim();
   for (const key of ['required','excluded','links']) feature[key] = featureField(key).value.split('\n').map(line => line.trim()).filter(Boolean);
   const point = featureField('point').value.trim();
   if (point) feature.reference_point_mm = inspectionVector(point,'Reference annotation'); else delete feature.reference_point_mm;
+  const center = featureField('center').value.trim();
+  if (center) feature.center_mm = inspectionVector(center,'CAD center'); else delete feature.center_mm;
+  delete feature.point_mm;
   const size = featureField('size').value.trim();
   if (size) feature.feature_size_mm = Number(size); else delete feature.feature_size_mm;
   delete feature.feature_scale_mm;
@@ -1912,9 +1918,10 @@ function featureEditorLoad(region) {
   featureDirty = false;
   const feature = region?.feature, section = feature?.sections?.[0];
   featureField('enabled').checked = !!feature; featureField('id').value = feature?.id || '';
-  for (const key of ['role','configuration','orientation','notes']) featureField(key).value = feature?.[key] || '';
+  for (const key of ['role','configuration','orientation','notes','symmetry_group']) featureField(key.replace('_','')).value = feature?.[key] || '';
   for (const key of ['required','excluded','links']) featureField(key).value = (feature?.[key] || []).join('\n');
   featureField('point').value = feature?.reference_point_mm?.join(' ') || '';
+  featureField('center').value = (feature?.center_mm || feature?.point_mm)?.join(' ') || '';
   featureField('size').value = feature?.feature_size_mm ?? feature?.feature_scale_mm ?? '';
   featureField('uncertainty').value = feature?.uncertainty_mm ?? '';
   featureField('sectionenabled').checked = !!section;
@@ -2025,6 +2032,7 @@ document.getElementById('regioneditor').addEventListener('input', event => {
   featureField('inspect').disabled = true; featureField('plot').setAttribute('hidden',''); featureField('station').hidden = true;
   featureEditorState(parts.get(current));
   featureField('status').textContent='Save the edited region before inspecting or recording its evidence.';
+  symmetryPanel(parts.get(current));
 });
 featureField('inspect').onclick = () => featureInspect();
 featureField('review').onclick = () => featureInspect(true);
@@ -4910,9 +4918,23 @@ function symmetryDrawPlane(report) {
   symmetryPlane.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),normal);
   symmetryPlane.position.copy(center); scene.add(symmetryPlane);
 }
+function symmetryFeatureSignature(entry) {
+  return JSON.stringify((entry?.target?.regions || []).filter(r => r.feature).map(r => [r.name,r.feature]));
+}
+function symmetryCategoryRows(report) {
+  const fixed = value => Number.isFinite(value) ? value.toFixed(4) : 'unknown';
+  return [['Category','Count / unmatched','Negative max mm','Positive max mm','Threshold mm','Result','On-plane max mm'],
+    ...[['Authored CAD centers',report.feature_centers?.cad_centers],
+        ['Reference annotations',report.feature_centers?.reference_points],
+        ['Periodic seams',report.cad?.periodic_seams]].map(([label,category]) =>
+      [label,`${category?.count || 0} total, ${category?.unmatched_count || 0} unmatched`,fixed(category?.sides?.negative?.max_mm),
+        fixed(category?.sides?.positive?.max_mm),fixed(category?.tolerance_mm),(category?.status || 'not_assessed').replaceAll('_',' '),fixed(category?.sides?.on_plane?.max_mm)])];
+}
 function symmetryFresh(entry, report) {
   return report?.status === 'measured' && report.token === entry?.token && !entry.error && !entry.target?.stale
     && !comparePreview.has(entry.name) && !comparePending.has(entry.name)
+    && (!report.feature_records || JSON.stringify(report.feature_records) === symmetryFeatureSignature(entry))
+    && !(entry.name === current && featureDirty)
     && JSON.stringify(report.options) === JSON.stringify(symmetryOptions(entry));
 }
 function symmetryPanel(entry) {
@@ -4930,7 +4952,7 @@ function symmetryPanel(entry) {
   const running = report?.token === entry?.token && ['running','cancelling'].includes(report?.status);
   const fresh = symmetryFresh(entry, report);
   symmetryElement('symmetrysource').textContent = source ? `Point cloud: ${source.filename || source.reference_file}` : `Reference: ${entry?.target?.file || 'choose a point cloud or attach a mesh'}`;
-  symmetryElement('symmetryrun').disabled = !entry || !sock || sock.readyState !== WebSocket.OPEN || running || !!comparePreview.get(entry?.name) || !!comparePending.get(entry?.name);
+  symmetryElement('symmetryrun').disabled = !entry || !sock || sock.readyState !== WebSocket.OPEN || running || featureDirty || !!comparePreview.get(entry?.name) || !!comparePending.get(entry?.name);
   symmetryElement('symmetrycancel').disabled = !running || !report.request_id || report.status === 'cancelling';
   symmetryElement('symmetryattached').disabled = !source || running;
   symmetryElement('symmetrycloud').disabled = running;
@@ -4938,7 +4960,7 @@ function symmetryPanel(entry) {
   symmetryElement('symmetrypreview').disabled = !fresh || !!source || !entry?.target;
   symmetryElement('symmetrydownload').disabled = !fresh;
   const stale = report && report.status === 'measured' && !fresh;
-  symmetryElement('symmetrystatus').textContent = stale ? 'Evidence is stale. The model, alignment, source, or thresholds changed; run it again.'
+  symmetryElement('symmetrystatus').textContent = stale ? 'Evidence is stale. The model, alignment, source, feature records, or thresholds changed; save edits and run it again.'
     : report?.error || (running ? report.phase || 'Verifying symmetry…' : report ? `Symmetry evidence: ${report.status}` : 'Choose an approximate normal and run the check. Coordinates use the current reference alignment.');
   const result = symmetryElement('symmetryresult'); result.replaceChildren();
   if (fresh) {
@@ -4953,6 +4975,12 @@ function symmetryPanel(entry) {
     }
     result.append(table);
     text(`Trim edges max ${fixed(cad.trim_edges.max_mm)} mm; trimmed faces max ${fixed(cad.trimmed_faces.max_mm)} mm. ${cad.sample_count} CAD samples across ${cad.faces} faces and ${cad.edges} edges.`);
+    for (const [label,count,negative,positive,threshold,status,onPlane] of symmetryCategoryRows(report).slice(1)) {
+      text(`${label}: ${status}.`, 'strong');
+      text(`${count}; threshold ${threshold} mm. Negative max ${negative} mm; positive max ${positive} mm; on-plane max ${onPlane} mm.`);
+    }
+    text(`Saved features without explicit locations: ${report.feature_centers?.unlocated_features?.length || 0}. They remain unassessed. Centers are authored annotations; their presence in the B-rep is not proven.`);
+    if (cad.periodic_seams) text(`${cad.periodic_seams.periodic_face_count} periodic faces; ${cad.periodic_seams.sample_count} seam samples. ${cad.periodic_seams.limitation}`);
     for (const warning of p.warnings) text(warning);
     text(cad.limitation);
     text(`Evidence ${report.identity.token.slice(0,12)} · source ${report.source_revision.slice(0,12)}`);

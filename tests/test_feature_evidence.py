@@ -93,7 +93,7 @@ def test_exact_geometry_identity_ignores_display_meshing_but_changes_for_holes()
     assert evidence.shape_identity(shape - Cylinder(1, 10)) != first
 
 
-@pytest.mark.parametrize("change", ["geometry", "reference", "alignment", "configuration", "role", "selection", "feature_size", "remove_size"])
+@pytest.mark.parametrize("change", ["geometry", "reference", "alignment", "configuration", "role", "selection", "feature_size", "remove_size", "center", "symmetry_group"])
 def test_review_stales_for_every_evidence_identity(change):
     region = compare.inspection_regions([feature_region()])[0]
     args = ["shape1", "scan1", compare.IDENTITY, None, region]
@@ -110,6 +110,10 @@ def test_review_stales_for_every_evidence_identity(change):
         region["feature"]["role"] = "actually cushion face"
     elif change == "feature_size":
         region["feature"]["feature_size_mm"] = .1
+    elif change == "center":
+        region["feature"]["center_mm"] = [3, 0, 0]
+    elif change == "symmetry_group":
+        region["feature"]["symmetry_group"] = "cushion holes"
     elif change == "remove_size":
         del region["feature"]["feature_size_mm"]
     else:

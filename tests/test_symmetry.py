@@ -125,7 +125,7 @@ def test_child_worker_cancellation_and_deadline_are_unknown():
         symmetry.run(shape, reference_mesh(), symmetry.Options(timeout_s=0.001), {})
 
 
-@pytest.mark.parametrize('action', ['cancel', 'rebuild', 'reference'])
+@pytest.mark.parametrize('action', ['cancel', 'rebuild', 'reference', 'feature'])
 def test_viewer_jobs_are_async_cancellable_and_do_not_publish_stale_distances(tmp_path, monkeypatch, action):
     part = project(tmp_path)
     server = Server(tmp_path); server.queue = asyncio.Queue(); server.rebuild(part)
@@ -133,7 +133,7 @@ def test_viewer_jobs_are_async_cancellable_and_do_not_publish_stale_distances(tm
     async def capture(message): messages.append(message)
     server.send = capture
     started, finish = threading.Event(), threading.Event()
-    def wait(shape, reference, options, identity, stop):
+    def wait(shape, reference, options, identity, stop, landmarks=None):
         started.set(); finish.wait(5)
         return {'status': 'measured', 'identity': identity, 'cad': {'sample_count': 1}}
     monkeypatch.setattr(symmetry, 'run', wait)
@@ -149,6 +149,8 @@ def test_viewer_jobs_are_async_cancellable_and_do_not_publish_stale_distances(tm
             await server.command(json.dumps({'type':'target_symmetry_cancel','name':'thing','token':job['token'],'request_id':job['request_id']}))
         elif action == 'rebuild':
             server.overrides['thing'] = {'width': 12}; server.rebuild(part)
+        elif action == 'feature':
+            compare.update_card(part, regions=[{'name':'new center','component':'body','feature':{'id':'new','center_mm':[1,0,0]}}])
         else:
             (tmp_path / 'scan.ply').write_bytes(reference_mesh().export(file_type='ply') + b'\n')
         finish.set(); await job['task']
@@ -254,3 +256,48 @@ def test_before_after_residuals_use_identical_samples_and_keep_regressions(monke
     assert worse['after_fit']['statistics']['p95_mm']>0.3
     assert worse['p95_improvement_mm']<0
     assert all(worse['baseline']['reference_sides'][s]['count']>0 for s in ('negative','positive'))
+
+
+def test_symmetry_refuses_feature_edits_before_watcher_refresh(tmp_path, monkeypatch):
+    part = project(tmp_path)
+    server = Server(tmp_path); server.queue = asyncio.Queue(); server.rebuild(part)
+    messages = []
+    async def capture(message): messages.append(message)
+    server.send = capture
+    compare.update_card(part, regions=[{'name':'saved center','component':'body','feature':{'id':'center','center_mm':[1,0,0]}}])
+    monkeypatch.setattr(symmetry, 'run', lambda *args, **kwargs: pytest.fail('must not measure old feature records'))
+    async def scenario():
+        await server.command(json.dumps({'type':'target_symmetry','name':'thing'}))
+        await server.symmetry_jobs['thing']['task']
+    asyncio.run(scenario())
+    assert messages[-1]['status'] == 'unknown'
+    assert 'feature settings changed' in messages[-1]['error']
+    assert 'cad' not in messages[-1]
+
+
+def test_cli_category_evidence_and_saved_centers_roundtrip_then_stale(tmp_path, monkeypatch, capsys):
+    from nurb import checks
+    part = project(tmp_path); monkeypatch.chdir(tmp_path)
+    regions = [{'name':name,'component':'body','feature':{'id':name,'point_mm':[x,0,0],'symmetry_group':'cushion holes'}}
+               for name,x in [('left',-3),('right',3)]]
+    compare.update_card(part, regions=regions)
+    saved = compare.setting(checks.settings(part))['regions']
+    assert saved[0]['feature']['center_mm'] == [-3,0,0]
+    assert 'point_mm' not in saved[0]['feature']
+    report = tmp_path/'symmetry.json'
+    cli.main(['symmetry','thing','--json','--output',str(report),'--edge-step','2'])
+    measured = json.loads(capsys.readouterr().out)
+    centers = measured['feature_centers']['cad_centers']
+    assert centers['status'] == 'within_sampled_threshold'
+    assert centers['count'] == centers['matched_count'] == 2
+    assert centers['sides']['negative']['max_mm'] < .001
+    assert centers['identity']['geometry'] == measured['identity']['geometry']
+    assert centers['identity']['token'] != measured['identity']['token']
+    assert measured['cad']['periodic_seams']['status'] == 'not_assessed'
+    assert measured['feature_centers']['reference_points']['count'] == 0
+    cli.main(['symmetry','thing','--json','--check-report',str(report),'--edge-step','2'])
+    assert json.loads(capsys.readouterr().out)['status'] == 'current'
+    saved[1]['feature']['center_mm'][1] = .4
+    compare.update_card(part, regions=saved)
+    cli.main(['symmetry','thing','--json','--check-report',str(report),'--edge-step','2'])
+    assert json.loads(capsys.readouterr().out)['status'] == 'stale'

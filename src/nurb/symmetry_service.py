@@ -7,7 +7,7 @@ import secrets
 import tempfile
 import threading
 
-from . import compare, scan, symmetry
+from . import checks, compare, scan, symmetry
 
 
 def _reference(server, message, target):
@@ -86,6 +86,10 @@ async def _job(server, path, message, options, base, entry, stopped, client):
                 raise ValueError("model inputs changed; wait for the rebuild before checking symmetry")
             shape = copy.deepcopy(entry["shape"])
             target = copy.deepcopy(entry.get("target") or {})
+            declared = compare.setting(checks.settings(path)) or {}
+            if (any(declared.get(key, []) != target.get(key, []) for key in ("file", "units", "regions"))
+                    or (declared.get("transform") is not None and declared["transform"] != target.get("transform"))):
+                raise ValueError("reference or feature settings changed; wait for rebuilding before checking symmetry")
             configuration = {"name": entry.get("variant") or "default", "parameters": {p["name"]: p["value"] for p in entry.get("params", [])}}
             transform = target.get("transform") or compare.IDENTITY
             source, units = await asyncio.to_thread(_reference, server, message, target)
@@ -96,8 +100,10 @@ async def _job(server, path, message, options, base, entry, stopped, client):
                     raise ValueError("the attached reference changed; wait for its refresh and run symmetry again")
             reference, unit, reference_id = symmetry.reference_snapshot(source, units)
             reference.apply_transform(compare._transform(transform))
-            contract = symmetry.identity(shape, reference_id, transform, configuration, revision, options)
-            measured = symmetry.run(shape, reference, options, contract, stopped.is_set)
+            from .symmetry_categories import landmarks
+            locations = landmarks(target.get("regions", []), transform)
+            contract = symmetry.identity(shape, reference_id, transform, configuration, revision, options, locations)
+            measured = symmetry.run(shape, reference, options, contract, stopped.is_set, landmarks=locations)
             return measured, unit, reference_id
         measured, unit, reference_id = await asyncio.to_thread(analyze)
         current = server.state.get(name) or {}
@@ -106,12 +112,13 @@ async def _job(server, path, message, options, base, entry, stopped, client):
         if (current is not entry or current.get("token") != base["token"] or stopped.is_set()
                 or current_configuration != configuration or server.overrides.get(name, {}) != overrides
                 or (current_target.get("transform") or compare.IDENTITY) != transform
-                or any(current_target.get(k) != target.get(k) for k in ("file", "units", "content_id", "stamp"))
+                or any(current_target.get(k) != target.get(k) for k in ("file", "units", "content_id", "stamp", "regions"))
                 or symmetry.source_revision(path) != revision or symmetry.reference_identity(source, unit) != reference_id):
             result.update(status="cancelled" if stopped.is_set() else "stale", error="Symmetry evidence was cancelled or its inputs changed; run it again.")
         else:
             relative = source.relative_to(server.root).as_posix() if source.is_relative_to(server.root) else source.name
-            result.update(measured, source_revision=revision, reference_kind="independent" if message.get("cloud") or message.get("reference_file") else "attached", configuration=configuration, reference_file=relative, reference_units=unit, alignment=list(transform))
+            result.update(measured, source_revision=revision, reference_kind="independent" if message.get("cloud") or message.get("reference_file") else "attached", configuration=configuration, reference_file=relative, reference_units=unit, alignment=list(transform),
+                          feature_records=[[r["name"], r["feature"]] for r in target.get("regions", []) if "feature" in r])
     except asyncio.CancelledError:
         stopped.set(); raise
     except Exception as exc:

@@ -109,11 +109,11 @@ def reference_snapshot(path, units=None):
     return reference, unit, digest.hexdigest()
 
 
-def identity(shape, reference_id, transform, configuration, revision, options):
+def identity(shape, reference_id, transform, configuration, revision, options, landmarks=None):
     from .feature_evidence import evidence_identity, shape_identity
     return evidence_identity(shape_identity(shape), reference_id, transform,
                              json.dumps(configuration, sort_keys=True),
-                             {"method": "symmetry-v1", "revision": revision, "options": asdict(options)})
+                             {"method": "symmetry-v2", "revision": revision, "options": asdict(options), "landmarks": landmarks or {}})
 
 
 def fit_plane(reference, options):
@@ -264,11 +264,14 @@ def cad_symmetry(shape, plane, options):
     if not np.isfinite(distances).all():
         raise ValueError("the CAD kernel returned a non-finite symmetry distance")
     kinds = np.asarray(kinds)
+    from .symmetry_categories import periodic_seams
+    seam_result = periodic_seams(shape, plane, options, options.sample_budget-len(points))
     return {"status": "within_sampled_threshold" if np.max(distances) <= options.cad_tolerance_mm else "deviations",
             "method": "reflected trimmed-face and trim-edge samples to finished boundary-only B-rep",
             "tolerance_mm": options.cad_tolerance_mm, "edge_step_mm": options.edge_step_mm,
             "faces": len(faces), "edges": len(edges), "sample_count": len(points),
             "sides": per_side(points, distances, normal, offset, options.cad_tolerance_mm),
+            "periodic_seams": seam_result,
             "trim_edges": statistics(distances[kinds == "trim_edges"], options.cad_tolerance_mm),
             "trimmed_faces": statistics(distances[kinds == "trimmed_faces"], options.cad_tolerance_mm),
             "worst_point_mm": points[int(np.argmax(distances))].tolist(),
@@ -276,7 +279,7 @@ def cad_symmetry(shape, plane, options):
             "limitation": "Finite samples include every trim edge and every trimmed face, but do not prove exact symmetry at every point. Reference fit and alignment error also contribute to these CAD distances."}
 
 
-def run(shape, reference, options, evidence_identity, stop=None):
+def run(shape, reference, options, evidence_identity, stop=None, landmarks=None):
     """Fit and check in one bounded child process, leaving live CAD untouched."""
     from build123d import export_brep
     with tempfile.TemporaryDirectory(prefix="nurb-symmetry-") as temporary:
@@ -285,6 +288,7 @@ def run(shape, reference, options, evidence_identity, stop=None):
         np.savez(root / "reference.npz", vertices=np.asarray(reference.vertices),
                  faces=np.asarray(getattr(reference, "faces", []), dtype=int).reshape(-1, 3))
         (root / "options.json").write_text(json.dumps(asdict(options)))
+        (root / "landmarks.json").write_text(json.dumps(landmarks or {}))
         env = dict(os.environ); env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent) + os.pathsep + env.get("PYTHONPATH", "")
         child = subprocess.Popen([sys.executable, "-m", "nurb.symmetry", str(root)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         deadline = time.monotonic() + options.timeout_s
@@ -302,7 +306,12 @@ def run(shape, reference, options, evidence_identity, stop=None):
             if child.returncode:
                 raise ValueError((error.strip().splitlines() or ["symmetry worker failed"])[-1][:500])
             result = json.loads((root / "result.json").read_text())
-            return {"kind": "symmetry_evidence", "schema_version": 1, "status": "measured", "identity": evidence_identity,
+            from .symmetry_categories import category_identity
+            for key, category in (("periodic_seams", result["cad"]["periodic_seams"]),
+                                  ("cad_centers", result["feature_centers"]["cad_centers"]),
+                                  ("reference_points", result["feature_centers"]["reference_points"])):
+                category["identity"] = category_identity(evidence_identity, key)
+            return {"kind": "symmetry_evidence", "schema_version": 2, "status": "measured", "identity": evidence_identity,
                     "options": asdict(options), **result}
         finally:
             if child.poll() is None:
@@ -318,7 +327,12 @@ def _worker(root):
     reference = trimesh.Trimesh(vertices=data["vertices"], faces=data["faces"], process=False) if len(data["faces"]) else trimesh.points.PointCloud(data["vertices"])
     options = Options(**json.loads((root / "options.json").read_text()))
     plane = fit_plane(reference, options)
-    result = {"plane": plane, "cad": cad_symmetry(import_brep(root / "shape.brep"), plane, options)}
+    from .symmetry_categories import feature_centers
+    saved = json.loads((root / "landmarks.json").read_text())
+    result = {"plane": plane, "cad": cad_symmetry(import_brep(root / "shape.brep"), plane, options),
+              "feature_centers": {"cad_centers": feature_centers(saved.get("cad_centers", []), plane, options.cad_tolerance_mm),
+                                  "reference_points": feature_centers(saved.get("reference_points", []), plane, options.reference_tolerance_mm),
+                                  "unlocated_features": saved.get("unlocated_features", [])}}
     (root / "result.json").write_text(json.dumps(result, allow_nan=False))
 
 
@@ -379,12 +393,14 @@ def command(args):
         reference, unit, reference_id = reference_snapshot(source, args.units or target.get("units"))
         reference.apply_transform(compare._transform(transform))
         revision = source_revision(part)
-        contract = identity(shape, reference_id, transform, configuration, revision, options)
+        from .symmetry_categories import landmarks
+        locations = landmarks(target.get("regions", []), transform)
+        contract = identity(shape, reference_id, transform, configuration, revision, options, locations)
         if args.check_report:
             previous = json.loads(Path(args.check_report).read_text())
             result = {"status": "current" if previous.get("identity") == contract else "stale", "identity": contract}
         else:
-            result = run(shape, reference, options, contract)
+            result = run(shape, reference, options, contract, landmarks=locations)
             if source_revision(part) != revision or reference_identity(source, unit) != reference_id:
                 result = {"status": "stale", "identity": contract, "error": "Model source or reference changed during verification; run it again."}
             result["configuration"] = configuration
@@ -406,6 +422,11 @@ def command(args):
                 for side in ("negative", "positive"):
                     measured = result["cad"]["sides"][side]
                     print(f"    {side}: {measured['count']} samples, p95 {measured.get('p95_mm', float('nan')):.6g} mm, max {measured.get('max_mm', float('nan')):.6g} mm")
+                for key, category in (("periodic seams", result["cad"]["periodic_seams"]),
+                                      ("CAD centers", result["feature_centers"]["cad_centers"]),
+                                      ("reference annotations", result["feature_centers"]["reference_points"])):
+                    print(f"  {key}: {category['status']}; {category['count']} locations, {category['unmatched_count']} unmatched; tolerance {category['tolerance_mm']:g} mm")
+                print(f"  unlocated features: {len(result['feature_centers']['unlocated_features'])}")
                 print(f"  {result['cad']['limitation']}")
     except (ValueError, OSError) as exc:
         if args.json:

@@ -66,9 +66,14 @@ def feature_record(raw):
     if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}", identity):
         raise ValueError("feature id needs 1 to 96 letters, digits, dots, colons, underscores or hyphens")
     result = {"id": identity}
-    for key in ("role", "configuration", "orientation", "notes"):
+    for key in ("role", "configuration", "orientation", "notes", "symmetry_group"):
         if key in raw:
             result[key] = _text(raw[key], f"feature {key}")
+    centers = [vector(raw[key], "CAD center in part mm").tolist() for key in ("center_mm", "point_mm") if key in raw]
+    if centers:
+        if any(center != centers[0] for center in centers):
+            raise ValueError("center_mm and point_mm disagree; keep one explicit CAD center")
+        result["center_mm"] = centers[0]
     if "reference_point_mm" in raw:
         result["reference_point_mm"] = vector(raw["reference_point_mm"], "reference point in source mm").tolist()
     for key in ("required", "excluded", "links"):

@@ -267,13 +267,15 @@ def test_feature_rename_preserves_identity_and_other_saved_series():
     js([("function featureRegionValues(", "function featureEditorLoad(")], """
 const previous={id:'stable-rim',feature_size_mm:.3,sections:[{name:'first'},{name:'second'}],review:{identity:{token:'old'}}};
 const selectedFeatureRegion=()=>({feature:previous});
-const fields={enabled:{checked:true},point:{value:''},size:{value:'0.3'},uncertainty:{value:''},sectionenabled:{checked:true},
+const fields={enabled:{checked:true},point:{value:''},center:{value:'-3 0 0'},symmetrygroup:{value:'cushion holes'},size:{value:'0.3'},uncertainty:{value:''},sectionenabled:{checked:true},
  offsets:{value:'-1 0 1'},sectionname:{value:'Updated station'},origin:{value:'0 0 0'},normal:{value:'0 0 1'},
  x:{value:'1 0 0'},tolerance:{value:'0'},expected:{value:'small T'}};
 for (const key of ['role','configuration','orientation','notes','required','excluded','links']) fields[key]={value:''};
 const featureField=id=>fields[id], inspectionVector=text=>text.split(' ').map(Number);
 const result=featureRegionValues({name:'Corrected headset rim',component:'body'});
 assert.equal(result.feature.id,'stable-rim');
+assert.deepEqual(result.feature.center_mm,[-3,0,0]);
+assert.equal(result.feature.symmetry_group,'cushion holes');
 assert.equal(result.feature.feature_size_mm,.3);
 assert.equal(result.feature.sections[1].name,'second');
 assert.deepEqual(result.feature.sections[0].offsets_mm,[-1,0,1]);
@@ -387,9 +389,44 @@ const fields={freshness:{},inspect:{},review:{},plot:{setAttribute(){this.hidden
 const featureField=id=>fields[id],selectedFeatureRegion=()=>({feature:{id:'rim',feature_size_mm:.3}});
 let featureDirty=false,featureInspection={name:'part',token:'build',result:{id:'rim',identity:{token:'known'},cad:[{}]}},listener;
 const document={getElementById:()=>({addEventListener:(event,callback)=>{listener=callback;}})};
+let symmetryRefreshes=0;function symmetryPanel(){symmetryRefreshes++;}
 featureEditorState(entry);assert.match(fields.freshness.textContent,/matches/);
 """ + handler + """
 listener({target:{id:'featuresize'}});
-assert.match(fields.freshness.textContent,/Unsaved feature edits/);
+assert.match(fields.freshness.textContent,/Unsaved feature edits/);assert.equal(symmetryRefreshes,1);
 assert.equal(featureInspection,null);assert.equal(fields.json.disabled,true);assert.equal(fields.svg.disabled,true);
+""")
+
+
+def test_symmetry_categories_keep_unknowns_counts_thresholds_and_stale_feature_records():
+    js([("function symmetryFeatureSignature(", "function symmetryPanel(")], """
+const current='part',comparePreview=new Map(),comparePending=new Map();let featureDirty=false;
+const options={axis:'x'},symmetryOptions=()=>options;
+const category={count:2,unmatched_count:1,tolerance_mm:.01,status:'deviations',sides:{negative:{count:1},positive:{count:1,max_mm:.4}}};
+const entry={name:'part',token:'build',target:{regions:[{name:'hole',feature:{id:'hole',center_mm:[3,0,0]}}]}};
+const report={status:'measured',token:'build',options,feature_records:[['hole',entry.target.regions[0].feature]],feature_centers:{cad_centers:category},cad:{}};
+const rows=symmetryCategoryRows(report);
+assert.deepEqual(rows[1],['Authored CAD centers','2 total, 1 unmatched','unknown','0.4000','0.0100','deviations','unknown']);
+assert.equal(rows[2][5],'not assessed');assert.equal(rows[3][5],'not assessed');
+assert.equal(symmetryFresh(entry,report),true);
+featureDirty=true;assert.equal(symmetryFresh(entry,report),false);featureDirty=false;
+report.feature_records=JSON.parse(JSON.stringify(report.feature_records));
+entry.target.regions[0].feature.center_mm[0]=4;
+assert.equal(symmetryFresh(entry,report),false);
+""")
+
+
+def test_explicit_center_editor_roundtrip_and_clear_do_not_restore_a_hidden_alias():
+    js([("function featureRegionValues(", "function featureEditorState(")], """
+const previous={id:'center',point_mm:[-3,0,0],symmetry_group:'cushion holes'};
+const selectedFeatureRegion=()=>({feature:previous}),current='part',parts=new Map();
+const fields=new Map(),featureField=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,setAttribute(){}});return fields.get(id);};
+let featureDirty=false,featureInspection=null;
+function featureEditorState(){}function inspectionVector(text){return text.split(' ').map(Number);}
+featureEditorLoad({feature:previous});
+assert.equal(featureField('center').value,'-3 0 0');assert.equal(featureField('symmetrygroup').value,'cushion holes');
+let saved=featureRegionValues({name:'left hole'}).feature;
+assert.deepEqual(saved.center_mm,[-3,0,0]);assert.equal(saved.symmetry_group,'cushion holes');assert.equal('point_mm' in saved,false);
+featureField('center').value='';saved=featureRegionValues({name:'left hole'}).feature;
+assert.equal('center_mm' in saved,false);assert.equal('point_mm' in saved,false);
 """)
