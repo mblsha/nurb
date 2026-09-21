@@ -266,10 +266,22 @@ def test_display_mesh_comparison_applies_node_transforms_and_reuses_component_me
 def test_display_mesh_comparison_rejects_a_unit_or_transform_mismatch(tmp_path):
     scene = trimesh.Scene()
     scene.add_geometry(trimesh.creation.box(extents=[2.0, 4.0, 6.0]))
-    with pytest.raises(ValueError, match="does not match the CAD bounds in millimetres"):
-        Server(tmp_path)._comparison_meshes(
-            {"glb": scene.export(file_type="glb"), "bbox": [2000.0, 4000.0, 6000.0]}
-        )
+    body = scene.export(file_type="glb")
+    for expected in ([2000.0, 4000.0, 6000.0], [6.0, 4.0, 2.0]):
+        with pytest.raises(ValueError, match="does not match the CAD bounds in millimetres"):
+            Server(tmp_path)._comparison_meshes({"glb": body, "bbox": expected})
+
+
+def test_display_mesh_comparison_allows_relative_faceting_gap_at_smooth_extrema(tmp_path):
+    # Relative-deflection tessellation can stop inside a smooth B-rep extremum. These
+    # are the measured extents from the spline-loft reconstruction that exposed it.
+    displayed = [164.2959, 95.6038, 85.5368]
+    scene = trimesh.Scene()
+    scene.add_geometry(trimesh.creation.box(extents=displayed))
+    whole, _ = Server(tmp_path, tolerance=0.1)._comparison_meshes(
+        {"glb": scene.export(file_type="glb"), "bbox": [164.3, 95.72, 85.54]}
+    )
+    assert whole.extents == pytest.approx(displayed, abs=1e-4)
 
 
 def test_legacy_auto_alignment_does_not_move_after_a_part_edit(tmp_path):

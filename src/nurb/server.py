@@ -708,8 +708,15 @@ class Server:
         expected = entry.get("bbox")
         if expected is not None and len(expected) == 3:
             actual = np.asarray(whole.extents, dtype=float)
-            if not np.isfinite(actual).all() or not np.allclose(
-                actual, np.asarray(expected, dtype=float), rtol=1e-4, atol=0.02
+            expected = np.asarray(expected, dtype=float)
+            # This is a coarse frame sanity check, not a tessellation accuracy test.
+            # OCCT's relative deflection can leave sparse curved meshes inside their
+            # smooth B-rep bounds, so compare scale proportionally. This still rejects
+            # gross unit or scale mistakes.
+            if (
+                not np.isfinite(actual).all()
+                or not np.isfinite(expected).all()
+                or not np.allclose(actual, expected, rtol=0.05, atol=0.05)
             ):
                 raise ValueError(
                     "the built display mesh does not match the CAD bounds in millimetres; rebuild the model"
