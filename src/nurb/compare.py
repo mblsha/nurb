@@ -111,6 +111,16 @@ def inspection_regions(raw):
             if np.any(high <= low):
                 raise ValueError(f"region {name!r} max must exceed min on every axis")
             out.append({"name": name, "bounds_mm": {"min": low.tolist(), "max": high.tolist()}})
+    feature_ids = set()
+    from .feature_evidence import feature_record
+
+    for original, normalized in zip(raw, out):
+        if "feature" in original:
+            feature = feature_record(original["feature"])
+            if feature["id"] in feature_ids:
+                raise ValueError("feature IDs must be unique across inspection regions")
+            feature_ids.add(feature["id"])
+            normalized["feature"] = feature
     return out
 
 

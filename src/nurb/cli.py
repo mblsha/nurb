@@ -861,6 +861,12 @@ def cmd_scan(args):
     try:
         for spec in args.section or (["x", "y", "z"] if getattr(args, "summary", False) else []):
             cuts.append(scan.section(mesh, spec, tolerance=args.tolerance))
+        for raw in getattr(args, "local_section", None) or []:
+            from .feature_evidence import section_definition
+            definition = section_definition(json.loads(raw))
+            for offset in definition["offsets_mm"]:
+                spec = {**definition, "origin_mm": [a + offset*b for a, b in zip(definition["origin_mm"], definition["normal"])]}
+                cuts.append(scan.section(mesh, spec, tolerance=definition["tolerance_mm"]))
     except ValueError as exc:
         sys.exit(f"  {exc}")
     if getattr(args, "summary", False):
@@ -919,8 +925,10 @@ def cmd_compare(args):
     skipped = []
     try:
         explicit_regions = [_inspection_region(value) for value in getattr(args, "region", None) or []]
+        if getattr(args, "regions_file", None):
+            explicit_regions.extend(compare.inspection_regions(json.loads(pathlib.Path(args.regions_file).read_text())))
         datum = json.loads(args.datum) if getattr(args, "datum", None) else None
-    except (ValueError, json.JSONDecodeError) as exc:
+    except (ValueError, OSError) as exc:
         sys.exit(f"  {exc}")
     for path in _resolve(root, args.part):
         try:
@@ -1043,6 +1051,22 @@ def cmd_compare(args):
                         transform=active_transform,
                         regions=regions,
                     )
+                if any("feature" in region for region in regions):
+                    import hashlib
+                    from . import feature_evidence
+                    geometry_id = feature_evidence.shape_identity(shape)
+                    reference_id = hashlib.sha256(_reference_path(root, file).read_bytes() + unit.encode()).hexdigest()
+                    aligned = mesh.copy()
+                    aligned.apply_transform(compare._transform(metrics["transform"]))
+                    cad_mesh = builder.to_mesh(shape)
+                    def feature_result(region):
+                        local_cad, local_reference = feature_evidence.selected_meshes(shape, cad_mesh, aligned, region)
+                        return {**feature_evidence.region_evidence(geometry_id, reference_id, metrics["transform"],
+                                                                   name if overrides else None, region),
+                                "frame": "part_mm", "method": "comparison mesh contours inside the region, without artificial caps",
+                                "cad": feature_evidence.sections(local_cad, region["feature"].get("sections", [])),
+                                "reference": feature_evidence.sections(local_reference, region["feature"].get("sections", []))}
+                    metrics["feature_evidence"] = [feature_result(region) for region in regions if "feature" in region]
                 metrics["alignment"] = applied_alignment
             except (ValueError, builder.BuildError) as exc:
                 if args.json:
@@ -1110,6 +1134,7 @@ def cmd_compare(args):
                 "detected_above_tolerance": metrics["detected_above_tolerance"],
                 "worst_regions": metrics["worst_regions"],
                 "inspection_regions": metrics.get("inspection_regions", []),
+                "feature_evidence": metrics.get("feature_evidence", []),
             }
             output.append(result)
             if not args.json:
@@ -1731,6 +1756,7 @@ def main(argv=None):
         "--tolerance", type=float, default=0.2,
         help="simplify the profile to this many mm (default 0.2)",
     )
+    s.add_argument("--local-section", action="append", metavar="JSON", help='local plane and station series: {"origin_mm":[0,0,0],"normal":[1,1,0],"offsets_mm":[-1,0,1]}; local contours default to no simplification')
     s.add_argument("--json", action="store_true", help="write complete bounds, fits, and untruncated sections")
     s.add_argument("--summary", action="store_true", help="compact reference features and section fits; STEP/B-rep includes exact faces, axes, and section areas")
     s.set_defaults(fn=cmd_scan)
@@ -1766,6 +1792,7 @@ def main(argv=None):
     )
     s.add_argument("--json", action="store_true", help="write complete structured comparison evidence")
     s.add_argument("--region", action="append", metavar="NAME=BOX", help="inspect NAME=x0,y0,z0:x1,y1,z1 in part mm, or NAME=@component; repeat to name regions")
+    s.add_argument("--regions-file", metavar="JSON_FILE", help="read named regions with semantic feature evidence and saved local section series")
     s.add_argument("--save-regions", action="store_true", help="persist the named inspection regions in the reference card")
     s.add_argument("--datum", metavar="JSON", help='preview plane, axis, or landmarks alignment in the current part frame; combine with --save-alignment to persist')
     s.set_defaults(fn=cmd_compare)

@@ -236,6 +236,7 @@ def inspection(path, mesh, sections=()):
         result["sections"].append({
             "axis": complete["axis"], "position_mm": complete["position_mm"],
             "plane_axes": complete["plane_axes"], "loop_count": len(complete["loops"]),
+            "origin_mm": complete["origin_mm"], "normal": complete["normal"], "basis": complete["basis"],
             "open_count": sum(not loop["closed"] for loop in complete["loops"]),
             "noise_candidate_count": cut["skipped"],
             "omitted_feature_count": max(0, len(complete["loops"]) - cut["skipped"] - 24),
@@ -287,6 +288,7 @@ def analytic_inspection(shape, sections=()):
         cross = cad_section(shape, section_by=plane)
         cuts.append({
             "axis": cut["axis"], "position_mm": cut["pos"], "area_mm2": float(cross.area),
+            "origin_mm": cut["origin"], "normal": cut["normal"], "basis": cut["basis"],
             "faces": [{"area_mm2": float(face.area), "hole_count": len(face.inner_wires()),
                        "perimeter_mm": float(sum(wire.length for wire in face.wires()))}
                       for face in cross.faces()],
@@ -395,24 +397,33 @@ def section(mesh, spec, tolerance=0.2):
     if not np.isfinite(tolerance) or tolerance < 0:
         raise ValueError("section tolerance must be a finite number at least 0 mm")
 
-    if not CUT.match(spec or ""):
-        raise ValueError(
-            f"section {spec!r} is not AXIS[:POS]. z cuts mid-mesh, z:0.7 at a "
-            f"fraction of the span, z:40mm at that coordinate in the scan's own frame"
-        )
-    axis = "xyz".index(spec[0])
-    lo, hi = float(mesh.bounds[0][axis]), float(mesh.bounds[1][axis])
-    pos = (lo + hi) / 2
-    if ":" in spec:
-        raw = spec.split(":", 1)[1]
-        pos = float(raw[:-2]) if raw.endswith("mm") else lo + float(raw) * (hi - lo)
-    normal, origin = np.zeros(3), np.zeros(3)
-    normal[axis], origin[axis] = 1.0, pos
-    segments = trimesh.intersections.mesh_plane(
-        mesh, plane_normal=normal, plane_origin=origin
-    )
-    keep = [i for i in range(3) if i != axis]
-    chains = _chains(np.asarray(segments)[:, :, keep]) if len(segments) else []
+    if isinstance(spec, dict):
+        from .feature_evidence import section_definition
+
+        definition = section_definition(spec)
+        origin, normal, u = (np.asarray(definition[key]) for key in ("origin_mm", "normal", "x_direction"))
+        basis = np.asarray([u, np.cross(normal, u)])
+        axis_name, pos, plane_axes = "local", 0.0, ("u", "v")
+    else:
+        if not CUT.match(spec or ""):
+            raise ValueError(
+                f"section {spec!r} is not AXIS[:POS]. z cuts mid-mesh, z:0.7 at a "
+                f"fraction of the span, z:40mm at that coordinate in the scan's own frame"
+            )
+        axis = "xyz".index(spec[0])
+        lo, hi = float(mesh.bounds[0][axis]), float(mesh.bounds[1][axis])
+        pos = (lo + hi) / 2
+        if ":" in spec:
+            raw = spec.split(":", 1)[1]
+            pos = float(raw[:-2]) if raw.endswith("mm") else lo + float(raw) * (hi - lo)
+        normal, origin = np.zeros(3), np.zeros(3)
+        normal[axis], origin[axis] = 1.0, pos
+        keep = [i for i in range(3) if i != axis]
+        basis = np.eye(3)[keep]
+        axis_name, plane_axes = spec[0], tuple("xyz"[i] for i in keep)
+    segments = trimesh.intersections.mesh_plane(mesh, plane_normal=normal, plane_origin=origin)
+    projected = (np.asarray(segments) - origin) @ basis.T if len(segments) else []
+    chains = _chains(projected) if len(segments) else []
     chains.sort(key=_length, reverse=True)
     floor = _length(chains[0]) * FRAGMENT if chains else 0.0
     profiles, skipped = [], 0
@@ -432,9 +443,10 @@ def section(mesh, spec, tolerance=0.2):
             }
         )
     return {
-        "axis": spec[0],
+        "axis": axis_name,
         "pos": pos,
-        "plane": tuple("xyz"[i] for i in keep),
+        "plane": plane_axes,
+        "basis": basis.tolist(),
         "profiles": profiles,
         "skipped": skipped,
         "floor": floor,
@@ -469,10 +481,7 @@ def _section_structured(cut):
             and circle["relative_rms_residual"] is not None
             and circle["relative_rms_residual"] <= 0.05
         ):
-            axis_point = [0.0, 0.0, 0.0]
-            axis_point["xyz".index(cut["axis"])] = float(cut["pos"])
-            for coordinate, axis_name in zip(circle["center_mm"], cut["plane"]):
-                axis_point["xyz".index(axis_name)] = float(coordinate)
+            axis_point = (np.asarray(cut["origin"]) + np.asarray(circle["center_mm"]) @ np.asarray(cut["basis"])).tolist()
             loop["cylinder_candidate"] = {
                 "axis_point_mm": axis_point,
                 "axis_direction": list(cut["normal"]),
@@ -489,6 +498,7 @@ def _section_structured(cut):
         "plane_axes": list(cut["plane"]),
         "origin_mm": list(cut["origin"]),
         "normal": list(cut["normal"]),
+        "basis": cut["basis"],
         "simplification": {
             "algorithm": "Douglas-Peucker",
             "tolerance_mm": float(cut["tolerance"]),
@@ -589,6 +599,8 @@ def section_report(cut):
     lines = [
         f"  section {cut['axis']} = {cut['pos']:.2f}mm  points are ({u}, {v}) in mm"
     ]
+    if cut["axis"] == "local":
+        lines = [f"  local section: origin {cut['origin']} mm; normal {cut['normal']}; points are (u, v) mm in the reported basis"]
     listed = [profile for profile in cut["profiles"] if not profile["noise_candidate"]]
     if not cut["profiles"]:
         lines.append("      the plane misses the mesh")

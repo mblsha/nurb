@@ -880,6 +880,14 @@ class Server:
             "regions": declared.get("regions", []),
         }
         entry["target_glb"] = hit["glb"]
+        if shape is not None and any("feature" in r for r in declared.get("regions", [])):
+            from . import feature_evidence
+            entry["evidence_geometry"] = feature_evidence.shape_identity(shape)
+            entry["target"]["feature_evidence"] = [
+                feature_evidence.region_evidence(entry["evidence_geometry"], hit["content_id"], transform,
+                                                entry.get("variant"), region)
+                for region in declared.get("regions", []) if "feature" in region
+            ]
 
     def _target_mesh(self, file, units):
         """The loaded target, cached by the file's mtime."""
@@ -938,6 +946,7 @@ class Server:
             "mesh": mesh,
             "glb": source_glb or trimesh.Scene([mesh]).export(file_type="glb"),
             "display_scale": scan.UNITS[unit] if source_glb is not None else 1.0,
+            "content_id": hashlib.sha256(path.read_bytes() + unit.encode()).hexdigest(),
             "stamp": stamp,
             "path": path.resolve(),
             "unit": unit,
@@ -1570,8 +1579,8 @@ class Server:
 
             try:
                 specs = msg.get("sections", ["x", "y", "z"])
-                if not isinstance(specs, list) or len(specs) > 24 or any(not isinstance(spec, str) for spec in specs):
-                    raise ValueError("request at most 24 axis-aligned sections")
+                if not isinstance(specs, list) or len(specs) > 24 or any(not isinstance(spec, (str, dict)) for spec in specs):
+                    raise ValueError("request at most 24 axis or local-plane sections")
                 async with self.building:
                     # A build can finish while this request waits for the kernel.
                     # Capture the reference and its build token only after that wait.
@@ -1609,6 +1618,66 @@ class Server:
                 await self.reply(client, response)
             except (ValueError, OSError) as exc:
                 await self.reply(client, {"type": "target_inspection", "name": name, "error": str(exc)})
+            return
+
+        if msg.get("type") == "feature_inspection":
+            from . import compare, feature_evidence
+
+            try:
+                async with self.building:
+                    entry = self.state.get(name, {})
+                    target = entry.get("target") or {}
+                    if entry.get("error") or not target or target.get("error") or target.get("stale"):
+                        raise ValueError("wait for a valid model and reference before inspecting a feature")
+                    if msg.get("token") != entry.get("token"):
+                        raise ValueError("the model rebuilt; inspect the feature again")
+                    regions = target.get("regions", [])
+                    selected = [r for r in regions if r.get("feature", {}).get("id") == msg.get("feature_id")]
+                    if len(selected) != 1:
+                        raise ValueError("save and select a unique feature before inspecting it")
+                    region = selected[0]
+                    card_bytes = path.with_suffix(".md").read_bytes()
+                    transform = list(target["transform"])
+                    token = entry["token"]
+                    stamp = target["stamp"]
+
+                    def inspect_feature():
+                        hit = self._target_mesh(target["file"], target.get("units"))
+                        if hit["stamp"] != stamp:
+                            raise ValueError("reference changed; wait for rebuilding before inspecting")
+                        cad, components = self._comparison_meshes(entry)
+                        reference = hit["mesh"].copy()
+                        reference.apply_transform(compare._transform(transform))
+                        cad, reference = feature_evidence.selected_meshes(entry["shape"], cad, reference, region, components)
+                        definitions = region["feature"].get("sections", [])
+                        identity = feature_evidence.region_evidence(entry["evidence_geometry"], hit["content_id"],
+                                                                   transform, entry.get("variant"), region)
+                        return {**identity, "frame": "part_mm", "method": "display mesh contours; no material fill or fit certification",
+                                "cad": feature_evidence.sections(cad, definitions),
+                                "reference": feature_evidence.sections(reference, definitions)}
+
+                    result = await asyncio.to_thread(inspect_feature)
+                    if (self.state.get(name) is not entry or target.get("stale") or target["transform"] != transform
+                            or self._target_mesh(target["file"], target.get("units"))["stamp"] != stamp
+                            or path.with_suffix(".md").read_bytes() != card_bytes):
+                        raise ValueError("model, reference or feature changed during inspection; inspect again")
+                    if msg.get("save_review") is True:
+                        if msg.get("identity") != result["identity"]:
+                            raise ValueError("inspect the current feature before recording its evidence")
+                        updated = []
+                        for r in regions:
+                            if r is region:
+                                r = {**r, "feature": {**r["feature"], "review": {"identity": result["identity"],
+                                                                            "note": msg.get("note", "")}}}
+                            updated.append(r)
+                        compare.update_card(path, regions=updated)
+                        target["stale"] = True
+                        self.queue.put_nowait(str(path))
+                        result["saved"] = True
+                    response = {"type": "feature_inspection", "name": name, "token": token, "result": result}
+                await self.reply(client, response)
+            except (ValueError, OSError) as exc:
+                await self.reply(client, {"type": "feature_inspection", "name": name, "error": str(exc)})
             return
 
         if msg.get("type") == "target_alignment":
@@ -1674,7 +1743,8 @@ class Server:
             self.queue.put_nowait(str(path))
             await self.reply(
                 client,
-                {"type": "target_settings", "name": name, "written": written},
+                {"type": "target_settings", "name": name, "written": written,
+                 **({"regions": compare.inspection_regions(changes["regions"])} if "regions" in changes else {})},
             )
             return
 

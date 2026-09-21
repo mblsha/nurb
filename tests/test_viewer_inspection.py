@@ -244,3 +244,48 @@ parts.set(current,{target:{regions:sent[0].regions}});regionWrites.delete(curren
 fields.regionexisting.value='';regionSave();assert.deepEqual(sent[1].regions,[{name:'A',component:'body'},{name:'B',component:'body'}]);
 fields.regionexisting.value='B';fields.regionname.value='edited';regionSave();assert.equal(sent.length,2);
 """)
+
+
+def test_feature_sections_expire_on_rebuild_even_before_new_metrics_arrive():
+    js([("function featureEditorState(", "function featureInspect(")], """
+const fields={freshness:{},inspect:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{}};
+const featureField=id=>fields[id], current='part';
+const selectedFeatureRegion=()=>({feature:{id:'rim'}});
+let featureInspection={name:'part',token:'old-build'}, featureDirty=false;
+featureEditorState({token:'new-build',target:{feature_evidence:[{id:'rim',status:'stale'}]}});
+assert.equal(featureInspection,null);
+assert.equal(fields.plot.hidden,true);
+assert.equal(fields.review.disabled,true);
+assert.match(fields.freshness.textContent,/stale/);
+assert.match(fields.status.textContent,/expired/);
+""")
+
+
+def test_feature_rename_preserves_identity_and_other_saved_series():
+    js([("function featureRegionValues(", "function featureEditorLoad(")], """
+const previous={id:'stable-rim',sections:[{name:'first'},{name:'second'}],review:{identity:{token:'old'}}};
+const selectedFeatureRegion=()=>({feature:previous});
+const fields={enabled:{checked:true},point:{value:''},uncertainty:{value:''},sectionenabled:{checked:true},
+ offsets:{value:'-1 0 1'},sectionname:{value:'Updated station'},origin:{value:'0 0 0'},normal:{value:'0 0 1'},
+ x:{value:'1 0 0'},tolerance:{value:'0'},expected:{value:'small T'}};
+for (const key of ['role','configuration','orientation','notes','required','excluded','links']) fields[key]={value:''};
+const featureField=id=>fields[id], inspectionVector=text=>text.split(' ').map(Number);
+const result=featureRegionValues({name:'Corrected headset rim',component:'body'});
+assert.equal(result.feature.id,'stable-rim');
+assert.equal(result.feature.sections[1].name,'second');
+assert.deepEqual(result.feature.sections[0].offsets_mm,[-1,0,1]);
+assert.equal(result.feature.review.identity.token,'old');
+""")
+
+
+def test_precise_verification_rejects_late_build_results():
+    js([("function verificationLanded(", "document.getElementById('verifycancel').onclick")], """
+const entry={token:'new',target:{verification:{status:'running'}}};
+const parts=new Map([['part',entry]]),current='part'; let renders=0;
+const verificationShow=()=>renders++;
+verificationLanded({name:'part',token:'old',status:'measured',metrics:{part:{max:0}}});
+assert.equal(entry.target.verification.status,'running'); assert.equal(renders,0);
+verificationLanded({name:'part',token:'new',status:'unknown',error:'deadline'});
+assert.equal(entry.target.verification.status,'unknown'); assert.equal(renders,1);
+assert.equal(entry.target.verification.metrics,undefined);
+""")
