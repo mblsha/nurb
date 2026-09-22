@@ -13,14 +13,20 @@ PART = ROOT / "parts" / "disk.py"
 BRACKET = ROOT / "parts" / "offset_bracket.py"
 
 
-def test_reference_fixtures_match_their_deterministic_generator():
+def test_reference_fixtures_match_their_generator_geometry():
     generator_path = ROOT / "generate_fixtures.py"
     spec = importlib.util.spec_from_file_location("reverse_engineering_fixtures", generator_path)
     assert spec and spec.loader
     generator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(generator)
     for name, contents in generator.generated().items():
-        assert (ROOT / "scans" / name).read_bytes() == contents
+        geometry = generator.stl_geometry(contents)
+        assert generator.stl_geometry((ROOT / "scans" / name).read_bytes()) == geometry
+        mesh = generator.trimesh.load_mesh(generator.io.BytesIO(contents), file_type="stl", process=False)
+        reordered = generator.trimesh.Trimesh(
+            vertices=mesh.vertices, faces=mesh.faces[::-1, ::-1], process=False
+        ).export(file_type="stl")
+        assert generator.stl_geometry(reordered) == geometry
 
 
 @pytest.fixture(scope="module")

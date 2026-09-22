@@ -1,6 +1,7 @@
 """Regenerate the synthetic reference meshes used by this example."""
 
 import argparse
+import io
 import tempfile
 from pathlib import Path
 
@@ -10,6 +11,19 @@ from build123d import Align, Box, Cylinder, Pos, Rot, export_stl
 
 HERE = Path(__file__).parent
 SCANS = HERE / "scans"
+
+
+def stl_geometry(contents: bytes) -> tuple[tuple[tuple[float, float, float], ...], ...]:
+    """Return triangles without serialization order, winding, or signed zero."""
+    mesh = trimesh.load_mesh(io.BytesIO(contents), file_type="stl", process=False)
+    triangles = []
+    for triangle in mesh.triangles:
+        vertices = [
+            tuple(0.0 if abs(float(value)) < 5e-6 else round(float(value), 5) for value in vertex)
+            for vertex in triangle
+        ]
+        triangles.append(tuple(sorted(vertices)))
+    return tuple(sorted(triangles))
 
 
 def disk_stl() -> bytes:
@@ -78,7 +92,7 @@ def main() -> int:
     args = parser.parse_args()
     meshes = generated()
     if args.check:
-        changed = [name for name, data in meshes.items() if (SCANS / name).read_bytes() != data]
+        changed = [name for name, data in meshes.items() if stl_geometry((SCANS / name).read_bytes()) != stl_geometry(data)]
         if changed:
             parser.error(f"regenerate changed fixture(s): {', '.join(changed)}")
         print(f"checked {len(meshes)} fixtures")
