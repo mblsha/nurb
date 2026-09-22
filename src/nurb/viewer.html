@@ -922,8 +922,184 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { SpaceMouseControls } from '/spacemouse.js';
-import { inspectionActions, inspectionGuidance, inspectionHydrateVerification, inspectionInitial, inspectionTransition, policyFromProvenance,
-  sectionSeriesAdd, sectionSeriesInitial, sectionSeriesRemove, sectionSeriesSelect, sectionSeriesSelected, sectionSeriesUpdate } from '/inspection-state.js';
+import { inspectionInitial, inspectionTransition, policyFromProvenance, sectionSeriesAdd, sectionSeriesInitial, sectionSeriesRemove } from '/inspection-state.js';
+import { createInspectionController, referenceMeshes, referenceSetMode, displayedMeshDispose, componentInfo, inspectionSelectedMetrics, inspectionRegionStatus, comparisonRows, comparisonToleranceMatches, comparisonMatrix, comparisonTransform, comparisonRigidTransform, comparisonWorst, comparisonAbove, symmetryCategoryRows } from '/inspection-viewer.js';
+
+const {
+  syncPins,
+  referenceInstance,
+  ghostAttach,
+  modelNodes,
+  inspectionRestore,
+  componentAncestors,
+  componentMembers,
+  componentResolveHidden,
+  componentHidden,
+  sectionDifference,
+  datumReset,
+  datumSend,
+  datumLanded,
+  regionSave,
+  evidenceRender,
+  featureSectionValue,
+  featureSectionStore,
+  featureSectionLoad,
+  featureRegionValues,
+  featureEditorLoad,
+  featureVerifiedResult,
+  featureEditorState,
+  featureExportState,
+  featureExport,
+  featureExportLanded,
+  featurePlot,
+  featureEditorInput,
+  verificationShow,
+  verificationLanded,
+  inspectionRegionBounds,
+  inspectionSelectRegion,
+  compareClear,
+  compareSamples,
+  comparisonPreview,
+  compareAlignment,
+  comparisonFocus,
+  comparisonTransformFields,
+  comparisonToleranceChanged,
+  importCancel,
+  importVisibility,
+  importLanded,
+  sectionUpdate,
+  symmetryClearPlane,
+  symmetryDrawPlane,
+  symmetryFresh,
+} = createInspectionController({
+  get AXES() { return AXES; },
+  get INSPECTION_MODES() { return INSPECTION_MODES; },
+  get Option() { return Option; },
+  get PARKED() { return PARKED; },
+  get WebSocket() { return WebSocket; },
+  atob: value => atob(value),
+  get camera() { return camera; },
+  get cap() { return cap; },
+  get compareAuto() { return compareAuto; },
+  get compareClear() { return compareClear; },
+  get compareInvalidate() { return compareInvalidate; },
+  get compareMap() { return compareMap; },
+  set compareMap(value) { compareMap = value; },
+  get compareMarks() { return compareMarks; },
+  get compareOpen() { return compareOpen; },
+  get comparePainted() { return comparePainted; },
+  set comparePainted(value) { comparePainted = value; },
+  get comparePanel() { return comparePanel; },
+  get comparePending() { return comparePending; },
+  get comparePreview() { return comparePreview; },
+  get compareScale() { return compareScale; },
+  get compareThrough() { return compareThrough; },
+  get comparisonPreview() { return comparisonPreview; },
+  get componentAncestors() { return componentAncestors; },
+  get componentMembers() { return componentMembers; },
+  get controls() { return controls; },
+  get crypto() { return crypto; },
+  get current() { return current; },
+  get currentFrameBox() { return currentFrameBox; },
+  get cutAt() { return cutAt; },
+  set cutAt(value) { cutAt = value; },
+  get cutAxis() { return cutAxis; },
+  set cutAxis(value) { cutAxis = value; },
+  get cutMm() { return cutMm; },
+  set cutMm(value) { cutMm = value; },
+  get cutSign() { return cutSign; },
+  set cutSign(value) { cutSign = value; },
+  get cutting() { return cutting; },
+  get datumOperation() { return datumOperation; },
+  get datumPreview() { return datumPreview; },
+  set datumPreview(value) { datumPreview = value; },
+  get datumReset() { return datumReset; },
+  get document() { return document; },
+  get embed() { return embed; },
+  get evidenceRender() { return evidenceRender; },
+  get evidenceWorkflow() { return evidenceWorkflow; },
+  set evidenceWorkflow(value) { evidenceWorkflow = value; },
+  get featureDirty() { return featureDirty; },
+  set featureDirty(value) { featureDirty = value; },
+  get featureEditorState() { return featureEditorState; },
+  get featureExportState() { return featureExportState; },
+  get featureField() { return featureField; },
+  get featureInspection() { return featureInspection; },
+  set featureInspection(value) { featureInspection = value; },
+  get featureInspectionLanded() { return featureInspectionLanded; },
+  get featureSectionLoad() { return featureSectionLoad; },
+  get featureSectionStore() { return featureSectionStore; },
+  get featureSectionValue() { return featureSectionValue; },
+  get featureSeries() { return featureSeries; },
+  set featureSeries(value) { featureSeries = value; },
+  get featureVerifiedResult() { return featureVerifiedResult; },
+  get frame() { return frame; },
+  get ghostGeo() { return ghostGeo; },
+  get ghostMaterial() { return ghostMaterial; },
+  get ghostWanted() { return ghostWanted; },
+  get hiddenComponents() { return hiddenComponents; },
+  set hiddenComponents(value) { hiddenComponents = value; },
+  get importCancel() { return importCancel; },
+  get importPreview() { return importPreview; },
+  set importPreview(value) { importPreview = value; },
+  get importVisibility() { return importVisibility; },
+  get inspectionBusy() { return inspectionBusy; },
+  get inspectionCaptureViewport() { return inspectionCaptureViewport; },
+  get inspectionField() { return inspectionField; },
+  get inspectionFor() { return inspectionFor; },
+  set inspectionFor(value) { inspectionFor = value; },
+  get inspectionFrameBox() { return inspectionFrameBox; },
+  set inspectionFrameBox(value) { inspectionFrameBox = value; },
+  get inspectionGroups() { return inspectionGroups; },
+  get inspectionKey() { return inspectionKey; },
+  get inspectionMode() { return inspectionMode; },
+  set inspectionMode(value) { inspectionMode = value; },
+  get inspectionRegionBounds() { return inspectionRegionBounds; },
+  get inspectionRegionError() { return inspectionRegionError; },
+  set inspectionRegionError(value) { inspectionRegionError = value; },
+  get inspectionRegionName() { return inspectionRegionName; },
+  set inspectionRegionName(value) { inspectionRegionName = value; },
+  get inspectionSave() { return inspectionSave; },
+  get inspectionSetMode() { return inspectionSetMode; },
+  get inspectionToleranceOverride() { return inspectionToleranceOverride; },
+  set inspectionToleranceOverride(value) { inspectionToleranceOverride = value; },
+  get inspectionVector() { return inspectionVector; },
+  get loader() { return loader; },
+  get localStorage() { return localStorage; },
+  get main() { return main; },
+  get mesh() { return mesh; },
+  get modelNodes() { return modelNodes; },
+  get parts() { return parts; },
+  get pins() { return pins; },
+  get pinsPlaced() { return pinsPlaced; },
+  get pinsWanted() { return pinsWanted; },
+  get plane() { return plane; },
+  get q() { return q; },
+  get referenceInstance() { return referenceInstance; },
+  get regionValues() { return regionValues; },
+  get regionWrites() { return regionWrites; },
+  get renderer() { return renderer; },
+  get scene() { return scene; },
+  get sectionCanvas() { return sectionCanvas; },
+  get sectionDrawingKey() { return sectionDrawingKey; },
+  set sectionDrawingKey(value) { sectionDrawingKey = value; },
+  get sectionStatus() { return sectionStatus; },
+  get selectedFeatureRegion() { return selectedFeatureRegion; },
+  get sock() { return sock; },
+  get symmetryClearPlane() { return symmetryClearPlane; },
+  get symmetryElement() { return symmetryElement; },
+  get symmetryOptions() { return symmetryOptions; },
+  get symmetryPanel() { return symmetryPanel; },
+  get symmetryPlane() { return symmetryPlane; },
+  set symmetryPlane(value) { symmetryPlane = value; },
+  get verificationHistory() { return verificationHistory; },
+  get verificationShow() { return verificationShow; },
+  get view() { return view; },
+  get window() { return window; },
+  get writerSourceVisible() { return writerSourceVisible; },
+  get writers() { return writers; }
+});
+
 
 const parts = new Map();
 // Constructions the project's parts repeat, from the server's duplication scan.
@@ -1129,7 +1305,7 @@ function clearPins() {
 // `pinsPlaced` is the rebuild lifecycle; a pin shows only when both agree. ?marks=0
 // starts the toggle off, for a still that wants the part checked but pictured clean.
 let pinsWanted = q.get('marks') !== '0', pinsPlaced = true;
-function syncPins() { pins.visible = pinsWanted && pinsPlaced && inspectionMode !== 'reference'; }
+
 
 const material = new THREE.MeshStandardMaterial({
   color: 0x9aa6b8, metalness: 0.05, roughness: 0.62, flatShading: false,
@@ -1165,189 +1341,6 @@ const ghostMaterial = new THREE.MeshStandardMaterial({
   transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide,
 });
 
-function referenceUsesSourceMaterial(mode) {
-  return mode === 'reference' || mode === 'side-by-side';
-}
-
-function referenceMaterialList(material) {
-  return Array.isArray(material) ? material : [material];
-}
-
-function referenceMaterialShape(source, make) {
-  const materials = referenceMaterialList(source).map(make);
-  return Array.isArray(source) ? materials : materials[0];
-}
-
-function referenceMeshes(root) {
-  const found = [];
-  root?.traverse(node => { if (node.isMesh) found.push(node); });
-  return found;
-}
-
-function referenceResources(root, cache) {
-  const geometries = new Set(), materials = new Set(), textures = new Set(), images = new Set();
-  root?.traverse(node => {
-    if (cache && node.geometry) geometries.add(node.geometry);
-    const owned = cache
-      ? referenceMaterialList(node.material)
-      : [...referenceMaterialList(node.userData.referenceSourceMaterial),
-        ...referenceMaterialList(node.userData.referenceAnalysisMaterial)];
-    for (const material of owned.filter(Boolean)) {
-      materials.add(material);
-      if (cache) for (const value of Object.values(material)) if (value?.isTexture) {
-        textures.add(value);
-        const image = value.source?.data;
-        if (image && typeof image.close === 'function') images.add(image);
-      }
-    }
-  });
-  return {geometries, materials, textures, images};
-}
-
-function referenceDispose(root, cache, preserve = null) {
-  const resources = referenceResources(root, cache);
-  const kept = preserve ? referenceResources(preserve, true) : null;
-  for (const kind of ['geometries','materials','textures','images']) if (kept)
-    for (const item of kept[kind]) resources[kind].delete(item);
-  const {geometries, materials, textures, images} = resources;
-  for (const geometry of geometries) geometry.dispose();
-  for (const material of materials) material.dispose();
-  for (const texture of textures) texture.dispose();
-  for (const image of images) image.close();
-}
-
-function referenceSanitizeScene(scene) {
-  const keep = new Set([scene]);
-  const include = node => { for (let here = node; here; here = here.parent) keep.add(here); };
-  for (const node of referenceMeshes(scene)) {
-    include(node);
-    if (node.isSkinnedMesh) for (const bone of node.skeleton?.bones || []) include(bone);
-  }
-  const discarded = new THREE.Group();
-  const nodes = [];
-  scene.traverse(node => nodes.push(node));
-  for (const node of nodes.reverse()) if (node !== scene && !keep.has(node) && node.parent && keep.has(node.parent)) {
-    node.parent.remove(node); discarded.add(node);
-  }
-  // A camera or light is occasionally used as a transform parent. Preserve that
-  // transform without importing its rendering behavior into the comparison scene.
-  for (const node of nodes) if (node.parent && (node.isCamera || node.isLight || node.isLine || node.isPoints)) {
-    const parent = node.parent, replacement = new THREE.Group().copy(node, false);
-    for (const child of [...node.children]) replacement.add(child);
-    parent.add(replacement); parent.remove(node); discarded.add(node);
-  }
-  referenceDispose(discarded, true, scene);
-  return scene;
-}
-
-function referenceCloneScene(scene) {
-  const cloned = scene.clone(true), copies = new Map();
-  const pair = (source, target) => {
-    copies.set(source, target);
-    for (let i = 0; i < source.children.length; i++) pair(source.children[i], target.children[i]);
-  };
-  pair(scene, cloned);
-  scene.traverse(source => {
-    if (!source.isSkinnedMesh || !source.skeleton) return;
-    const target = copies.get(source);
-    const bones = source.skeleton.bones.map(bone => copies.get(bone)).filter(Boolean);
-    if (bones.length !== source.skeleton.bones.length) return;
-    target.skeleton = new THREE.Skeleton(bones, source.skeleton.boneInverses.map(matrix => matrix.clone()));
-    target.bindMode = source.bindMode;
-    target.bindMatrix.copy(source.bindMatrix);
-    target.bindMatrixInverse.copy(source.bindMatrixInverse);
-  });
-  return cloned;
-}
-
-function referenceInstance(scene, displayScale) {
-  const root = new THREE.Group(), content = referenceCloneScene(scene);
-  root.name = 'target';
-  content.scale.multiplyScalar(Number.isFinite(displayScale) && displayScale > 0 ? displayScale : 1);
-  root.add(content);
-  for (const node of referenceMeshes(root)) {
-    if (!node.geometry.attributes.normal) node.geometry.computeVertexNormals();
-    node.userData.nurbReference = true;
-    node.userData.referenceSourceMaterial = referenceMaterialShape(node.material, source => {
-      const cloned = source.clone();
-      cloned.side = THREE.DoubleSide;
-      cloned.clippingPlanes = [plane];
-      cloned.needsUpdate = true;
-      return cloned;
-    });
-    node.userData.referenceAnalysisMaterial = referenceMaterialShape(node.material, () => {
-      const cloned = ghostMaterial.clone();
-      cloned.clippingPlanes = [plane];
-      return cloned;
-    });
-  }
-  return root;
-}
-
-function referenceSetMode(root, mode) {
-  const source = referenceUsesSourceMaterial(mode);
-  for (const node of referenceMeshes(root)) node.material = source
-    ? node.userData.referenceSourceMaterial : node.userData.referenceAnalysisMaterial;
-}
-
-function modelGeometryDispose(root) {
-  root?.traverse(node => {
-    if ((node.isMesh || node.isLineSegments) && !node.userData.nurbReference) node.geometry.dispose();
-  });
-}
-
-function displayedMeshDispose(root) {
-  const reference = root?.getObjectByName('target');
-  if (reference) referenceDispose(reference, false);
-  modelGeometryDispose(root);
-}
-
-async function ghostAttach(name, entry) {
-  const t = entry.target;
-  const group = mesh;
-  if (!t || !t.stamp || !renderer || !group) return;
-  let rec = ghostGeo.get(name), retired = null;
-  if (!rec || rec.stamp !== t.stamp) {
-    let gltf;
-    // Not awaited by any caller, so a rejection here would surface as an unhandled
-    // error for what is only a race: a server restart or a rebuild replacing the
-    // entry mid-fetch. The next paint fetches again.
-    try { gltf = await loader.loadAsync(`/glb/${name}.target.glb?v=${t.stamp}`); }
-    catch (e) { return; }
-    const source = referenceSanitizeScene(gltf.scene);
-    if (!referenceMeshes(source).length) return;
-    if (current !== name || mesh !== group || parts.get(name)?.target?.stamp !== t.stamp) {
-      referenceDispose(source, true);
-      return;
-    }
-    const latest = ghostGeo.get(name);
-    if (latest?.stamp === t.stamp) {
-      if (latest.scene !== source) referenceDispose(source, true);
-      rec = latest;
-    } else {
-      rec = { stamp: t.stamp, scene: source };
-      retired = latest?.scene;
-      ghostGeo.set(name, rec);
-    }
-  }
-  // The fetch was awaited, so the part on screen may have rebuilt or moved on;
-  // attach only to the exact group that asked for this ghost, and never twice.
-  if (current !== name || mesh !== group || parts.get(name)?.target?.stamp !== t.stamp) return;
-  const stale = group.getObjectByName('target');
-  if (stale) { group.remove(stale); referenceDispose(stale, false); }
-  if (retired && retired !== rec.scene) referenceDispose(retired, true);
-  const g = referenceInstance(rec.scene, t.display_scale);
-  referenceSetMode(g, inspectionMode);
-  const shownTransform = comparePreview.get(name)?.transform || t.transform;
-  if (Array.isArray(shownTransform) && shownTransform.length === 16) {
-    g.matrixAutoUpdate = false;
-    g.matrix.set(...shownTransform);
-  } else g.position.set(...(t.offset || [0, 0, 0]));
-  g.visible = ghostWanted;
-  group.add(g);
-  comparePanel(parts.get(name) || entry);
-  return g;
-}
 
 // ---- comparison panel ----
 // Display state never enters parameter payloads or the export request.
@@ -1361,61 +1354,15 @@ let inspectionGroups = new Map();
 let inspectionRegionName = null, inspectionRegionError = null;
 const regionWrites = new Map();
 const inspectionKey = name => `nurb.inspection.v1.${name}`;
-function componentInfo(node) {
-  const metadata = node.userData?.nurb || {};
-  return { id: metadata.id || node.name, label: metadata.label || node.name || 'Part',
-    role: metadata.role || (node.name === 'context' ? 'context' : 'part') };
-}
-function modelNodes() {
-  const nodes = [];
-  mesh?.traverse(node => { if (node.isMesh && !node.userData.nurbReference) nodes.push(node); });
-  return nodes;
-}
+
+
 function inspectionSave() {
   if (!current || view) return;
   localStorage.setItem(inspectionKey(current), JSON.stringify({mode: inspectionMode,
     hidden: [...hiddenComponents], axis: cutAxis, fraction: cutAt, mm: cutMm}));
 }
-function inspectionRestore(name) {
-  if (inspectionFor === name) return;
-  inspectionFor = name; inspectionToleranceOverride = null;
-  datumReset();
-  inspectionRegionName = null; inspectionRegionError = null;
-  inspectionFrameBox = null;
-  hiddenComponents = new Set();
-  if (!view && !q.has('mode')) {
-    try {
-      const state = JSON.parse(localStorage.getItem(inspectionKey(name)) || '{}');
-      inspectionMode = INSPECTION_MODES.includes(state.mode) ? state.mode : 'model';
-      hiddenComponents = new Set(Array.isArray(state.hidden) ? state.hidden : []);
-      if (!q.has('cut')) {
-        cutAxis = ['x','y','z'].includes(state.axis) ? state.axis : 'z';
-        cutAt = Number.isFinite(state.fraction) ? state.fraction : .5;
-        cutMm = Number.isFinite(state.mm) ? state.mm : null;
-      }
-    } catch { inspectionMode = 'model'; }
-  }
-  if (q.has('hide')) hiddenComponents = new Set(q.get('hide').split(','));
-  sectionDrawingKey = null;
-}
-function componentAncestors(node) {
-  const result = []; let parent = node.userData?.nurb?.parent;
-  while (parent && !result.includes(parent)) { result.push(parent); parent = inspectionGroups.get(parent)?.parent; }
-  return result;
-}
-function componentMembers(selector) {
-  const ids = new Set([...inspectionGroups.values(),...modelNodes().map(componentInfo)]
-    .filter(info => info.id === selector || info.label === selector).map(info => info.id));
-  return modelNodes().filter(node => [componentInfo(node).id,...componentAncestors(node)].some(id => ids.has(id)));
-}
-function componentResolveHidden() {
-  const selectors = hiddenComponents;
-  hiddenComponents = new Set([...inspectionGroups.values(),...modelNodes().map(componentInfo)]
-    .filter(info => selectors.has(info.id) || selectors.has(info.label)).map(info => info.id));
-}
-function componentHidden(node) {
-  return [componentInfo(node).id, ...componentAncestors(node)].some(id => hiddenComponents.has(id));
-}
+
+
 function componentPanel() {
   const panel = document.getElementById('components'), list = document.getElementById('componentlist');
   const nodes = modelNodes();
@@ -1517,189 +1464,6 @@ function inspectionRender() {
   renderer.setScissorTest(false); renderer.setViewport(0, 0, width, height); syncWriters();
 }
 
-// Triangle intersections remain in the part's coordinates. A degree-two graph is
-// required before filling: open scans, touching branches and coplanar faces cannot
-// establish inside versus outside. Even-odd filling preserves nested holes/islands.
-function sectionSegments(geometry, matrix, axis, at, epsilon = 1e-5) {
-  const positions = geometry.attributes.position, indices = geometry.index;
-  const axes = [0,1,2].filter(value => value !== axis), segments = [];
-  let ambiguous = false;
-  const vertex = index => new THREE.Vector3().fromBufferAttribute(positions, index).applyMatrix4(matrix).toArray();
-  const count = indices ? indices.count : positions.count;
-  const key = point => point.map(value => Math.round(value / epsilon)).join(',');
-  for (let offset = 0; offset < count; offset += 3) {
-    const triangle = [0,1,2].map(i => vertex(indices ? indices.getX(offset + i) : offset + i));
-    const distances = triangle.map(point => point[axis] - at);
-    if (distances.every(value => value > epsilon) || distances.every(value => value < -epsilon)) continue;
-    if (distances.filter(value => Math.abs(value) <= epsilon).length > 1) { ambiguous = true; continue; }
-    const hits = [];
-    for (let i = 0; i < 3; i++) {
-      const j = (i + 1) % 3, a = triangle[i], b = triangle[j], da = distances[i], db = distances[j];
-      if (Math.abs(da) <= epsilon) hits.push(axes.map(index => a[index]));
-      else if ((da < 0) !== (db < 0) && Math.abs(db) > epsilon) {
-        const t = da / (da - db); hits.push(axes.map(index => a[index] + t * (b[index] - a[index])));
-      }
-    }
-    const unique = [...new Map(hits.map(point => [key(point), point])).values()];
-    if (unique.length !== 2) continue;
-    segments.push(unique);
-  }
-  return {segments, ambiguous};
-}
-
-function sectionAssemble(segments, ambiguous = false, epsilon = 1e-5) {
-  const points = new Map(), edges = new Set();
-  const key = point => point.map(value => Math.round(value / epsilon)).join(',');
-  for (const segment of segments) {
-    const ids = segment.map(key), edge = [...ids].sort().join('|');
-    if (edges.has(edge)) { ambiguous = true; continue; }
-    edges.add(edge);
-    for (let i = 0; i < 2; i++) {
-      if (!points.has(ids[i])) points.set(ids[i], {point: segment[i], adjacent: []});
-      points.get(ids[i]).adjacent.push(ids[1-i]);
-    }
-  }
-  const open = [...points.values()].some(point => point.adjacent.length !== 2);
-  const loops = [], visited = new Set();
-  if (!open) for (const start of points.keys()) {
-    if (visited.has(start)) continue;
-    const loop = []; let previous = null, here = start;
-    while (!visited.has(here)) {
-      visited.add(here); const node = points.get(here); loop.push(node.point);
-      const next = node.adjacent.find(other => other !== previous); previous = here; here = next;
-    }
-    if (here !== start || loop.length < 3) ambiguous = true;
-    else loops.push(loop);
-  }
-  // Reject crossing boundaries, including overlapping shells in a single mesh.
-  const cross = (a,b,c) => (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]);
-  for (let i = 0; i < segments.length && !ambiguous; i++) for (let j = i + 1; j < segments.length; j++) {
-    const [a,b] = segments[i], [c,d] = segments[j];
-    if (cross(a,b,c)*cross(a,b,d) < -(epsilon ** 2) && cross(c,d,a)*cross(c,d,b) < -(epsilon ** 2)) { ambiguous = true; break; }
-  }
-  return {loops, segments, valid: !open && !ambiguous, reason: ambiguous ? 'ambiguous or coplanar contours' : open ? 'open contours' : null};
-}
-
-function sectionContours(geometry, matrix, axis, at, epsilon = 1e-5) {
-  const cut = sectionSegments(geometry, matrix, axis, at, epsilon);
-  return sectionAssemble(cut.segments, cut.ambiguous, epsilon);
-}
-
-function sectionContoursMany(nodes, matrixFor, axis, at, epsilon = 1e-5) {
-  // GLTF splits one closed surface into primitives at material boundaries. Join
-  // their cut segments before judging degree two, or every such seam looks open.
-  const cuts = nodes.map(node => sectionSegments(node.geometry, matrixFor(node), axis, at, epsilon));
-  return sectionAssemble(cuts.flatMap(cut => cut.segments), cuts.some(cut => cut.ambiguous), epsilon);
-}
-// Separable squared Euclidean distance transform. Work stays linear in the image
-// size even when a large tolerance spans hundreds of pixels.
-function sectionMaskDistance(mask, width, height) {
-  if (!mask.some(Boolean)) return new Float64Array(width*height).fill(Infinity);
-  const far = (width + height) ** 2, first = new Float64Array(width * height), result = new Float64Array(width * height);
-  const line = (values, count) => {
-    const sites = new Int32Array(count), limits = new Float64Array(count + 1), out = new Float64Array(count);
-    let k = 0; sites[0] = 0; limits[0] = -Infinity; limits[1] = Infinity;
-    for (let q = 1; q < count; q++) {
-      let crossing;
-      do {
-        const p = sites[k]; crossing = ((values[q] + q*q) - (values[p] + p*p)) / (2*(q-p));
-        if (crossing <= limits[k]) k--; else break;
-      } while (k >= 0);
-      k++; sites[k] = q; limits[k] = crossing; limits[k+1] = Infinity;
-    }
-    k = 0;
-    for (let q = 0; q < count; q++) { while (limits[k+1] < q) k++; out[q] = (q-sites[k])**2 + values[sites[k]]; }
-    return out;
-  };
-  for (let y = 0; y < height; y++) {
-    const values = new Float64Array(width);
-    for (let x = 0; x < width; x++) values[x] = mask[y*width+x] ? 0 : far;
-    first.set(line(values,width),y*width);
-  }
-  for (let x = 0; x < width; x++) {
-    const values = new Float64Array(height);
-    for (let y = 0; y < height; y++) values[y] = first[y*width+x];
-    const out = line(values,height);
-    for (let y = 0; y < height; y++) result[y*width+x] = out[y];
-  }
-  return result;
-}
-function sectionMaskClassify(cad, reference, width, height, tolerancePixels) {
-  const limit = Math.max(0,tolerancePixels) ** 2;
-  const toCad = sectionMaskDistance(cad,width,height), toReference = sectionMaskDistance(reference,width,height);
-  const classes = new Uint8Array(width*height);
-  for (let i = 0; i < classes.length; i++) {
-    if (cad[i] && reference[i]) classes[i] = 1;
-    else if (cad[i]) classes[i] = toReference[i] <= limit ? 1 : 2;
-    else if (reference[i]) classes[i] = toCad[i] <= limit ? 1 : 3;
-  }
-  return classes;
-}
-
-function sectionDifference() {
-  if (inspectionMode !== 'section' || !mesh) return;
-  const reference = mesh.getObjectByName('target');
-  if (!reference) { sectionStatus.textContent = 'Reference geometry is not ready. No filled difference.'; window.__nurb.section = null; return; }
-  const axis = {x:0,y:1,z:2}[cutAxis], at = plane.constant / cutSign - mesh.position[cutAxis];
-  const tolerance = Math.max(0,Number(inspectionToleranceOverride ?? parts.get(current)?.target?.tolerance_mm) || 0);
-  const key = [current, mesh.userData.token, parts.get(current)?.target?.stamp, tolerance, cutAxis, at,
-    reference.matrix.elements.join(','), [...hiddenComponents].join(','), ...(inspectionCaptureViewport || [main.clientWidth,main.clientHeight]), camera.zoom, controls.target.toArray().join(',')].join(':');
-  if (key === sectionDrawingKey) return;
-  sectionDrawingKey = key;
-  mesh.updateMatrixWorld(true);
-  const inverse = mesh.matrixWorld.clone().invert();
-  const cad = modelNodes().filter(node => node.visible && componentInfo(node).role !== 'context');
-  const gather = node => sectionContours(node.geometry, new THREE.Matrix4().multiplyMatrices(inverse, node.matrixWorld), axis, at);
-  const referenceNodes = referenceMeshes(reference);
-  const referenceContours = sectionContoursMany(referenceNodes,
-    node => new THREE.Matrix4().multiplyMatrices(inverse, node.matrixWorld), axis, at);
-  const sides = [cad.map(gather), [referenceContours]];
-  const all = sides.flat(), segments = all.flatMap(result => result.segments);
-  const [canvasWidth,canvasHeight]=inspectionCaptureViewport || [main.clientWidth,main.clientHeight];
-  const width = Math.max(1, Math.round(canvasWidth / 2)), height = Math.max(1,canvasHeight);
-  sectionCanvas.width = width; sectionCanvas.height = height;
-  const context = sectionCanvas.getContext('2d'); context.fillStyle = '#16181d'; context.fillRect(0,0,width,height);
-  const prefix = `${cutAxis.toUpperCase()} = ${at.toFixed(3)} mm (part frame). `;
-  if (!segments.length) { sectionStatus.textContent = prefix + 'No contours intersect this plane.'; window.__nurb.section = {axis:cutAxis,position_mm:at,frame:'part_mm',valid:true,empty:true}; return; }
-  const valid = all.every(result => result.valid);
-  cap.visible = cutting && valid;
-  const planeAxes = [0,1,2].filter(index => index !== axis);
-  const center = controls.target.clone().sub(mesh.position).toArray();
-  const scale = height / Math.abs(camera.top - camera.bottom) * camera.zoom;
-  const project = point => [width/2+(point[0]-center[planeAxes[0]])*scale, height/2-(point[1]-center[planeAxes[1]])*scale];
-  if (valid) {
-    const masks = sides.map(results => {
-      const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
-      const mask = canvas.getContext('2d'); mask.fillStyle = '#fff';
-      for (const result of results) {
-        mask.beginPath();
-        for (const loop of result.loops) { loop.forEach((point, i) => mask[i ? 'lineTo' : 'moveTo'](...project(point))); mask.closePath(); }
-        mask.fill('evenodd');
-      }
-      const rgba = mask.getImageData(0,0,width,height).data;
-      return Uint8Array.from({length:width*height}, (_,i) => rgba[i*4+3] > 127 ? 1 : 0);
-    });
-    const image = context.getImageData(0,0,width,height);
-    const classes = sectionMaskClassify(masks[0],masks[1],width,height,tolerance*scale);
-    const colors = [null,[139,160,153,255],[240,194,116,255],[98,199,239,255]];
-    for (let i = 0; i < classes.length; i++) if (classes[i]) image.data.set(colors[classes[i]],i*4);
-    context.putImageData(image,0,0);
-  }
-  sides.forEach((results, side) => {
-    context.strokeStyle = side ? '#62c7ef' : '#f0c274'; context.lineWidth = 1;
-    context.beginPath();
-    for (const result of results) for (const [a,b] of result.segments) { context.moveTo(...project(a)); context.lineTo(...project(b)); }
-    context.stroke();
-  });
-  const axes = ['X','Y','Z'].filter((_, index) => index !== axis);
-  context.fillStyle = '#e6e8ec'; context.font = '12px monospace';
-  context.fillText(`${axes[0]} →   ${axes[1]} ↑   ${(100/scale).toFixed(2)} mm / 100 px`, 16, height - (embed ? 44 : 18));
-  sectionStatus.textContent = prefix + (valid ? `Gray: shared or within ${tolerance.toFixed(3)} mm · amber: excess CAD · blue: excess reference. Unmuted outlines; triangle sections, raster fill.`
-    : `No filled difference: ${[...new Set(all.map(result => result.reason).filter(Boolean))].join('; ')}. Outlines only; move the plane or repair the mesh.`);
-  window.__nurb.section = {axis: cutAxis, position_mm: at, frame: 'part_mm', valid, tolerance_mm:tolerance, method: 'triangle-plane contours, even-odd raster masks with Euclidean tolerance'};
-}
-
-
 document.getElementById('inspectreference').onclick = () => {
   if (!sock || sock.readyState !== WebSocket.OPEN || !current) return;
   document.getElementById('referenceinspection').open = true;
@@ -1748,12 +1512,7 @@ function referenceInspectionLanded(message) {
 }
 
 let datumPreview = null;
-function datumReset() {
-  if (datumPreview) comparePreview.delete(datumPreview.name);
-  datumPreview = null;
-  document.getElementById('datumapply').disabled = true;
-  document.getElementById('datumstatus').textContent = '';
-}
+
 function inspectionVector(value, label) {
   const values = value.trim().split(/[\s,]+/).map(Number);
   if (values.length !== 3 || !values.every(Number.isFinite)) throw new Error(`${label} needs three numbers, X Y Z.`);
@@ -1774,26 +1533,7 @@ function datumOperation() {
     target_origin_mm: inspectionVector(document.getElementById('datumtargetorigin').value,'CAD origin'),
     target_direction: inspectionVector(document.getElementById('datumtargetdirection').value,'CAD direction')};
 }
-function datumSend(save) {
-  const status = document.getElementById('datumstatus');
-  try {
-    if (!sock || sock.readyState !== WebSocket.OPEN) throw new Error('Reconnect to preview alignment.');
-    if (save) {
-      if (!datumPreview || datumPreview.name !== current || datumPreview.token !== parts.get(current)?.token) {
-        datumReset(); throw new Error('The selected part or build changed. Preview alignment again before applying.');
-      }
-      if (!datumPreview.transform) throw new Error('Wait for the alignment preview before applying.');
-    } else {
-      const token = parts.get(current)?.token;
-      if (!current || !token) throw new Error('Build the selected part before previewing alignment.');
-      datumPreview = {name:current,token,operation:datumOperation(),transform:null};
-      document.getElementById('datumapply').disabled = true;
-    }
-    const preview = datumPreview;
-    sock.send(JSON.stringify({type:'target_alignment',name:preview.name,operation:preview.operation,token:preview.token,save}));
-    status.textContent = save ? 'Saving alignment…' : 'Measuring alignment preview…';
-  } catch (error) { status.textContent = error.message; }
-}
+
 document.getElementById('datumkind').onchange = event => {
   const landmarks = event.target.value === 'landmarks';
   document.getElementById('datumvectors').hidden = landmarks;
@@ -1804,23 +1544,7 @@ document.getElementById('datumapply').onclick = () => datumSend(true);
 document.getElementById('datumalignment').oninput = () => {
   datumPreview = null; document.getElementById('datumapply').disabled = true;
 };
-function datumLanded(message) {
-  if (message.name !== current || !datumPreview || datumPreview.name !== current || datumPreview.token !== parts.get(current)?.token) return;
-  if (message.token && message.token !== datumPreview.token) return;
-  const status = document.getElementById('datumstatus');
-  if (message.error) { status.textContent = message.error; return; }
-  if (message.token !== datumPreview.token) return;
-  if (Array.isArray(message.written) ? message.written.length > 0 : !!message.written) { datumPreview = null; document.getElementById('datumapply').disabled = true; status.textContent = 'Alignment saved.'; return; }
-  if (!Array.isArray(message.transform) || message.transform.length !== 16 || !message.transform.every(Number.isFinite)) {
-    datumReset(); status.textContent = 'The alignment response had no valid transform. Preview again.'; return;
-  }
-  datumPreview.transform = [...message.transform];
-  comparisonPreview(datumPreview.transform, 'Datum alignment preview. Apply to save it.');
-  inspectionSetMode('overlay');
-  document.getElementById('datumapply').disabled = false;
-  const residual = Number.isFinite(message.max_residual_mm) ? ` Maximum residual ${message.max_residual_mm.toFixed(3)} mm.` : '';
-  status.textContent = `Preview ready.${residual} Plane and axis alignment leave unconstrained motion unchanged.`;
-}
+
 function regionValues() {
   const name = document.getElementById('regionname').value.trim();
   if (!name) throw new Error('Give the region a name.');
@@ -1834,22 +1558,7 @@ function regionValues() {
   if (!min.every((value,index) => value < max[index])) throw new Error('Each maximum must be greater than the matching minimum.');
   return featureRegionValues({name,bounds_mm:{min,max}});
 }
-function regionSave(remove = false) {
-  const status = document.getElementById('regionstatus');
-  try {
-    if (!sock || sock.readyState !== WebSocket.OPEN) throw new Error('Reconnect to save regions.');
-    if (regionWrites.has(current)) throw new Error('Wait for the previous region change to finish.');
-    const name = document.getElementById('regionname').value.trim();
-    const previous = document.getElementById('regionexisting').value;
-    const regions = [...(parts.get(current)?.target?.regions || [])].filter(region => region.name !== (previous || name));
-    if (!remove) regions.push(regionValues());
-    sock.send(JSON.stringify({type:'target_settings',name:current,regions}));
-    regionWrites.set(current,regions);
-    document.getElementById('regionsave').disabled = true;
-    document.getElementById('regionremove').disabled = true;
-    status.textContent = remove ? 'Removing region…' : 'Saving region…';
-  } catch (error) { status.textContent = error.message; }
-}
+
 document.getElementById('regionsave').onclick = () => regionSave();
 document.getElementById('regionremove').onclick = () => regionSave(true);
 document.getElementById('regionkind').onchange = event => {
@@ -1916,109 +1625,12 @@ const featureField = name => document.getElementById('feature'+name);
 function evidenceMove(event) {
   evidenceWorkflow=inspectionTransition(evidenceWorkflow,event); evidenceRender(); return evidenceWorkflow;
 }
-function evidenceRender() {
-  const guidance=document.getElementById('evidenceguidance'); if (!guidance) return;
-  const actions=inspectionActions(evidenceWorkflow);
-  guidance.textContent=inspectionGuidance(evidenceWorkflow);
-  featureField('inspect').disabled=!actions.inspect;
-  document.getElementById('verifyrun').disabled=!actions.verify;
-  document.getElementById('verifycancel').disabled=!actions.cancel;
-  inspectionField('save').disabled=!actions.save || inspectionBusy;
-  inspectionField('capture').disabled=!actions.capture || inspectionBusy;
-  document.getElementById('inspectionworkflow').dataset.phase=evidenceWorkflow.capture.status==='capturing'?'capture':evidenceWorkflow.verification.status;
-}
+
 function selectedFeatureRegion() {
   return (parts.get(current)?.target?.regions || []).find(region => region.name === document.getElementById('regionexisting').value);
 }
-function featureSectionValue() {
-  const offsets = featureField('offsets').value.trim().split(/[\s,]+/).filter(Boolean).map(Number);
-  return {name:featureField('sectionname').value.trim(),origin_mm:inspectionVector(featureField('origin').value,'Local origin'),
-    normal:inspectionVector(featureField('normal').value,'Local normal'),x_direction:inspectionVector(featureField('x').value,'Local horizontal direction'),
-    offsets_mm:offsets,tolerance_mm:Number(featureField('tolerance').value),expected:featureField('expected').value.trim()};
-}
-function featureSectionStore() {
-  if (featureField('sectionenabled').checked) featureSeries=sectionSeriesUpdate(featureSeries,featureSectionValue());
-}
-function featureSectionLoad(index) {
-  featureSeries=sectionSeriesSelect(featureSeries,index);
-  const section=sectionSeriesSelected(featureSeries);
-  featureField('sectionchoice').replaceChildren(...featureSeries.items.map((item,i)=>new Option(item.name || `Series ${i+1}`,String(i))));
-  featureField('sectionchoice').value=String(featureSeries.index); featureField('sectionchoice').disabled=!section;
-  featureField('sectionremove').disabled=!section;
-  for (const [id,key,fallback] of [['origin','origin_mm',[0,0,0]],['normal','normal',[0,0,1]],['x','x_direction',[1,0,0]],['offsets','offsets_mm',[0]]]) featureField(id).value=(section?.[key] || fallback).join(' ');
-  featureField('sectionname').value=section?.name || 'Mating profile'; featureField('tolerance').value=section?.tolerance_mm ?? 0; featureField('expected').value=section?.expected || '';
-  featureField('extras').textContent=featureSeries.items.length ? `${featureSeries.index+1} of ${featureSeries.items.length} independently oriented section series.` : 'Add a section series to inspect this interface.';
-}
-function featureRegionValues(region) {
-  if (!featureField('enabled').checked) return region;
-  const previous = selectedFeatureRegion()?.feature;
-  const feature = {...previous, id: previous?.id || crypto.randomUUID()};
-  for (const key of ['role','configuration','orientation','notes','symmetry_group']) feature[key] = featureField(key.replace('_','')).value.trim();
-  for (const key of ['required','excluded','links']) feature[key] = featureField(key).value.split('\n').map(line => line.trim()).filter(Boolean);
-  const point = featureField('point').value.trim();
-  if (point) feature.reference_point_mm = inspectionVector(point,'Reference annotation'); else delete feature.reference_point_mm;
-  const center = featureField('center').value.trim();
-  if (center) feature.center_mm = inspectionVector(center,'CAD center'); else delete feature.center_mm;
-  delete feature.point_mm;
-  const size = featureField('size').value.trim();
-  if (size) feature.feature_size_mm = Number(size); else delete feature.feature_size_mm;
-  delete feature.feature_scale_mm;
-  const uncertainty = featureField('uncertainty').value.trim();
-  if (uncertainty) feature.uncertainty_mm = Number(uncertainty); else delete feature.uncertainty_mm;
-  if (featureField('sectionenabled').checked) {
-    featureSectionStore(); feature.sections=structuredClone(featureSeries.items);
-  } else feature.sections = [];
-  return {...region,feature};
-}
-function featureEditorLoad(region) {
-  featureDirty = false;
-  const feature = region?.feature;
-  const interfaceSelect=document.getElementById('evidenceinterface');
-  if (interfaceSelect && [...interfaceSelect.options].some(option=>option.value===region?.name)) interfaceSelect.value=region.name;
-  else if (interfaceSelect) interfaceSelect.value='';
-  featureField('enabled').checked = !!feature; featureField('id').value = feature?.id || '';
-  for (const key of ['role','configuration','orientation','notes','symmetry_group']) featureField(key.replace('_','')).value = feature?.[key] || '';
-  for (const key of ['required','excluded','links']) featureField(key).value = (feature?.[key] || []).join('\n');
-  featureField('point').value = feature?.reference_point_mm?.join(' ') || '';
-  featureField('center').value = (feature?.center_mm || feature?.point_mm)?.join(' ') || '';
-  featureField('size').value = feature?.feature_size_mm ?? feature?.feature_scale_mm ?? '';
-  featureField('uncertainty').value = feature?.uncertainty_mm ?? '';
-  featureSeries=sectionSeriesInitial(feature?.sections || []);
-  featureField('sectionenabled').checked = !!featureSeries.items.length; featureSectionLoad(0);
-  evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'select',part:current,token:parts.get(current)?.token,
-    interfaceId:feature?.id || null,source:inspectionField('sectionquality')?.value || evidenceWorkflow.source,
-    freshness:parts.get(current)?.target?.stale?'stale':'current'});
-  featureInspection = null; featureField('review').disabled = true; featureField('plot').setAttribute('hidden',''); featureField('station').hidden = true;
-  featureField('status').textContent = ''; featureEditorState(parts.get(current));
-}
-function featureVerifiedResult(entry, featureId=selectedFeatureRegion()?.feature?.id) {
-  const verification=entry?.target?.verification;
-  if (verification?.status!=='measured' || verification.token!==entry?.token || entry?.target?.stale) return null;
-  return (verification.metrics?.feature_evidence || []).find(result=>result.id===featureId) || null;
-}
-function featureEditorState(entry) {
-  const selected = selectedFeatureRegion(), record = entry?.target?.feature_evidence?.find(item => item.id === selected?.feature?.id);
-  featureField('freshness').textContent = featureDirty ? 'Unsaved feature edits: save the region before inspecting.' : !selected?.feature ? 'Save a feature to keep its identity and evidence.'
-    : entry?.target?.stale ? 'Evidence stale: model or reference settings changed.'
-    : record?.status === 'current' ? 'Recorded inspection matches the current geometry, reference, alignment and feature contract. This is evidence, not a fit certificate.'
-    : record?.status === 'stale' ? 'Evidence stale: geometry, reference, alignment or feature contract changed. Inspect again.'
-    : 'No inspection recorded for this feature.';
-  if (evidenceWorkflow.token && entry?.token && evidenceWorkflow.token!==entry.token)
-    evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'rebuild',token:entry.token,freshness:entry.target?.stale?'stale':'current'});
-  evidenceWorkflow={...evidenceWorkflow,part:current,token:entry?.token,interfaceId:selected?.feature?.id || null,
-    freshness:entry?.target?.stale?'stale':evidenceWorkflow.freshness,dirty:featureDirty};
-  evidenceWorkflow=inspectionHydrateVerification(evidenceWorkflow,entry);
-  evidenceRender();
-  featureField('verified').disabled = featureDirty || !featureVerifiedResult(entry,selected?.feature?.id);
-  if (featureInspection && (featureInspection.name !== current || featureInspection.token !== entry?.token || entry?.target?.stale
-      || (record?.identity && record.identity.token !== featureInspection.result?.identity?.token)
-      || (featureInspection.result?.source==='verified' && (entry?.target?.verification?.status!=='measured'
-          || featureInspection.result.verification_request_id!==entry?.target?.verification?.request_id)))) {
-    featureInspection = null; featureField('review').disabled = true; featureField('plot').setAttribute('hidden',''); featureField('station').hidden = true;
-    featureField('status').textContent = 'Displayed sections expired after a rebuild, reference or feature change. Inspect again.';
-  }
-  featureExportState();
-}
+
+
 function featureInspect(save = false) {
   const region = selectedFeatureRegion();
   if (featureDirty || !region?.feature || !sock || sock.readyState !== WebSocket.OPEN) return;
@@ -2055,53 +1667,8 @@ function featureInspectionLanded(message) {
   featureExportState();
   featurePlot();
 }
-function featureExportState() {
-  const entry=parts.get(current);
-  const ready = !featureDirty && featureInspection?.token === parts.get(current)?.token
-    && !entry?.target?.stale && featureInspection?.result?.id
-    && featureInspection?.result?.identity?.token && featureInspection?.result?.cad?.length;
-  const currentVerification=featureInspection?.result?.source!=='verified'
-    || entry?.target?.verification?.status==='measured' && featureInspection.result.verification_request_id===entry?.target?.verification?.request_id;
-  featureField('json').disabled = !ready || !currentVerification;
-  featureField('svg').disabled = !ready || !currentVerification;
-}
-function featureExport(format) {
-  featureEditorState(parts.get(current));
-  if (featureDirty || !featureInspection || featureField(format).disabled || !sock || sock.readyState !== WebSocket.OPEN) return;
-  featureField('status').textContent = 'Preparing current section evidence…';
-  sock.send(JSON.stringify({type:'feature_export',name:current,token:featureInspection.token,
-    feature_id:featureInspection.result.id,identity:featureInspection.result.identity,
-    verification_request_id:featureInspection.result.source==='verified' ? featureInspection.result.verification_request_id : undefined,
-    format,station:Number(featureField('station').value || 0)}));
-}
-async function featureExportLanded(message) {
-  if (message.name !== current) return;
-  if (message.error) { featureField('status').textContent = message.error; return; }
-  if (featureDirty || message.token !== parts.get(current)?.token || parts.get(current)?.target?.stale
-      || message.identity?.token !== featureInspection?.result?.identity?.token) return;
-  try {
-    const saved = await window.downloadArtifact(message.artifact);
-    featureField('status').textContent = saved?.path ? 'Section evidence saved.' : 'Section evidence download started.';
-  } catch (error) { featureField('status').textContent = `Could not export section evidence: ${error.message}`; }
-}
-function featurePlot() {
-  if (!featureInspection) return;
-  const result = featureInspection.result, index = Number(featureField('station').value || 0), svg = featureField('plot');
-  svg.replaceChildren();
-  const cuts = [result.cad[index],result.reference[index]];
-  const all = cuts.flatMap(cut => cut?.loops.flatMap(loop => loop.points_mm) || []);
-  const make = (name, attrs, text) => { const el = document.createElementNS('http://www.w3.org/2000/svg',name); for (const [key,value] of Object.entries(attrs)) el.setAttribute(key,value); if (text) el.textContent = text; svg.append(el); return el; };
-  if (!all.length) { make('text',{x:15,y:35,fill:'#ddd'},'This station misses both surfaces.'); return; }
-  const low=[0,1].map(axis => all.reduce((n,p)=>Math.min(n,p[axis]),Infinity)), high=[0,1].map(axis => all.reduce((n,p)=>Math.max(n,p[axis]),-Infinity));
-  const scale=Math.min(320/Math.max(.01,high[0]-low[0]),180/Math.max(.01,high[1]-low[1]));
-  const project=p=>[180+(p[0]-(low[0]+high[0])/2)*scale,112-(p[1]-(low[1]+high[1])/2)*scale];
-  cuts.forEach((cut,side) => (cut?.loops || []).forEach(loop => {
-    const points=loop.closed ? [...loop.points_mm,loop.points_mm[0]] : loop.points_mm;
-    make('polyline',{points:points.map(p=>project(p).join(',')).join(' '),fill:'none',stroke:side?'#62c7ef':'#f0c274','stroke-width':1.4});
-  }));
-  make('text',{x:12,y:229,fill:'#ddd','font-size':11},`u →  v ↑   ${(100/scale).toPrecision(4)} mm / 100 px`);
-  svg.setAttribute('aria-label',`${cuts[0]?.name || 'Local section'}, CAD amber, reference blue; ${cuts[0]?.expected || 'no expected profile recorded'}`);
-}
+
+
 featureField('locate').onclick = () => {
   try {
     const point=inspectionVector(featureField('point').value,'Reference annotation');
@@ -2143,14 +1710,8 @@ featureField('frameview').onclick = () => {
     featureField('status').textContent='Local origin and orientation copied from the current view. Set station offsets, then save the region.';
   } catch (error) { featureField('status').textContent=error.message; }
 };
-document.getElementById('regioneditor').addEventListener('input', event => {
-  if (['regionexisting','featurestation','featuresectionchoice','featurereviewnote'].includes(event.target.id)) return;
-  featureDirty = true; featureInspection = null; featureField('review').disabled = true;
-  featureField('inspect').disabled = true; featureField('plot').setAttribute('hidden',''); featureField('station').hidden = true;
-  featureEditorState(parts.get(current));
-  featureField('status').textContent='Save the edited region before inspecting or recording its evidence.';
-  symmetryPanel(parts.get(current));
-});
+
+document.getElementById('regioneditor').addEventListener('input', featureEditorInput);
 featureField('inspect').onclick = () => featureInspect();
 featureField('verified').onclick = () => {
   const entry=parts.get(current), result=featureVerifiedResult(entry);
@@ -2163,52 +1724,8 @@ featureField('svg').onclick = () => featureExport('svg');
 
 // ---- separately budgeted precise comparison ----
 const verificationHistory = new Map();
-function verificationShow(entry) {
-  if (entry?.target?.verification) verificationHistory.set(entry.name,entry.target.verification);
-  const state = entry?.target?.verification || verificationHistory.get(entry?.name), output = document.getElementById('verifyresult');
-  const currentState = state && state.token === entry?.token && !entry?.target?.stale;
-  evidenceWorkflow=inspectionHydrateVerification(evidenceWorkflow,entry);
-  evidenceRender();
-  output.replaceChildren();
-  const status = document.getElementById('verifystatus');
-  if (!state) { status.textContent = 'No precise verification for this build.'; return; }
-  if (!currentState) { status.textContent = 'Precise evidence is stale after a model or reference change. Run verification again.'; return; }
-  status.textContent = `${state.phase || state.status}${state.error ? ': '+state.error : ''}`;
-  const add = text => { const p=document.createElement('p'); p.textContent=text; output.append(p); };
-  const policy=state.provenance;
-  if (policy) {
-    add(`Requested deflection ${policy.absolute_deflection_mm} mm; budget ${policy.timeout_s} s / ${Number(policy.max_triangles).toLocaleString()} triangles.`);
-    if (policy.memory) add(`RSS limit ${policy.memory.limit_mb} MiB: ${policy.memory.enforcement}. ${policy.memory.limitation}`);
-    for (const warning of policy.warnings || []) add(warning);
-  }
-  if (state.resources) add(`Phase: ${state.resources.phase || state.phase}; peak sampled child RSS ${state.resources.peak_rss_mb == null ? 'not recorded' : Number(state.resources.peak_rss_mb).toFixed(1)+' MiB'}.`);
-  if (entry.target.last_verification && state.status!=='measured') add('The last completed result is retained separately. It is not the result of this request. The live display estimate is unchanged.');
-  if (state.status === 'measured' && state.metrics) {
-    for (const [key,label] of [['part','CAD → reference'],['target','reference → CAD']]) {
-      const result=state.metrics[key];
-      if (result) add(`${label}: sampled max ${Number(result.sampled_max).toFixed(4)} mm; p95 ${Number(result.p95).toFixed(4)} mm.`);
-    }
-    add(state.metrics.detected_above_tolerance ? 'Sampled deviations exceed the accepted tolerance.' : 'No sampled deviation exceeds the accepted tolerance. Check every functional feature.');
-    add('Meshing deflection and sampled distances do not certify physical fit or an exact error bound.');
-  } else if (['unknown','stale','cancelled'].includes(state.status)) add('No precise measurement was produced for this request.');
-}
-function verificationLanded(message) {
-  if (message.current_verification) message=message.current_verification;
-  const entry=parts.get(message.name);
-  if (!entry?.target || message.token !== entry.token) return;
-  const previous=entry.target.verification;
-  if (previous?.request_id && message.request_id !== previous.request_id && message.status !== 'queued'
-      && message.replaces_request_id !== previous.request_id) return;
-  entry.target.verification=message;
-  if (message.name === current) {
-    evidenceWorkflow=inspectionHydrateVerification(evidenceWorkflow,entry);
-    if (message.status==='measured') {
-      const result=featureVerifiedResult(entry);
-      if (result) featureInspectionLanded({name:current,token:entry.token,result});
-    }
-    verificationShow(entry); featureEditorState(entry);
-  }
-}
+
+
 document.getElementById('verifycancel').onclick = () => {
   const entry=parts.get(current), state=entry?.target?.verification;
   if (!state?.request_id || !sock || sock.readyState !== WebSocket.OPEN) return;
@@ -2229,63 +1746,7 @@ document.getElementById('verifyrun').onclick = () => {
   verificationShow(entry); sock.send(JSON.stringify(message));
 };
 
-function inspectionSelectedMetrics(metrics, name) {
-  if (!name) return metrics;
-  return metrics?.inspection_regions?.find(region => region.name === name) || null;
-}
-function inspectionRegionStatus(metrics, tolerance) {
-  if (!metrics) return 'Waiting for measurements of this region.';
-  if (metrics.status === 'unresolved') return metrics.error || 'The region selector could not be resolved.';
-  if (metrics.status === 'empty') return 'No sampled surfaces in this region.';
-  const verdict = comparisonAbove(metrics,tolerance) ? 'Deviation above tolerance detected.' : 'No sampled deviation above tolerance detected.';
-  if (metrics.status === 'partial') {
-    const missing = [!metrics.part && 'CAD', !metrics.target && 'reference'].filter(Boolean).join(' and ');
-    return `Partial region: no ${missing} samples. ${verdict}`;
-  }
-  return verdict;
-}
-function inspectionRegionBounds(entry, name) {
-  const measured = inspectionSelectedMetrics(entry?.target?.metrics,name);
-  const region = entry?.target?.regions?.find(region => region.name === name) || measured?.selector || measured;
-  if (!region) return {error:`No inspection region named ${name}. Choose a saved region.`};
-  if (measured?.status === 'unresolved') return {error:`Region ${name}: ${measured.error || 'the selector could not be resolved'}.`};
-  const bounds = measured?.bounds_mm || region.bounds_mm || measured?.capture?.bounds_mm;
-  if (bounds && mesh) {
-    const lo = bounds.min, hi = bounds.max;
-    if ([lo,hi].every(values => Array.isArray(values) && values.length === 3 && values.every(Number.isFinite))
-        && lo.every((value,index) => value <= hi[index])) {
-      return {box:new THREE.Box3(new THREE.Vector3(...lo),new THREE.Vector3(...hi)).translate(mesh.position)};
-    }
-  }
-  const selector = region.component || region.selector?.component;
-  if (selector && mesh) {
-    const matches = [...inspectionGroups.values(),...modelNodes().map(componentInfo)].filter(info => [info.id,info.label].includes(selector));
-    const members = matches.length === 1 ? componentMembers(matches[0].id) : [];
-    if (matches.length === 1 && members.length) {
-      const box = new THREE.Box3(); members.forEach(node => box.expandByObject(node));
-      if (!box.isEmpty()) return {box};
-    }
-  }
-  return {error:`Region ${name} has no resolvable bounds. Choose a unique component ID or label, or edit its box.`};
-}
-function inspectionSelectRegion(name, capture = false) {
-  inspectionRegionName = name || null;
-  inspectionRegionError = null;
-  if (!name) {
-    inspectionFrameBox = null;
-    if (currentFrameBox) frame(currentFrameBox,null,true);
-  } else {
-    const resolved = inspectionRegionBounds(parts.get(current),name);
-    if (resolved.error) {
-      inspectionRegionError = resolved.error;
-      if (capture) window.__nurb.error = resolved.error;
-    } else {
-      inspectionFrameBox = resolved.box.clone(); frame(resolved.box,null,true);
-    }
-  }
-  comparePanel(parts.get(current));
-  return !inspectionRegionError;
-}
+
 function inspectionRegions(entry) {
   const box = document.getElementById('inspectionregions');
   const regions = entry?.target?.regions || entry?.target?.metrics?.inspection_regions || [];
@@ -2301,22 +1762,7 @@ document.getElementById('comparewhole').onclick = () => inspectionSelectRegion(n
 // ---- comparison panel ----
 // Old servers provide only max/median/p95. Keep those useful without inventing a
 // tolerance verdict or spatial result that the server did not calculate.
-function comparisonRows(metrics) {
-  return [['part', 'CAD → reference'], ['target', 'reference → CAD']].map(([key, label]) => {
-    const row = metrics?.[key];
-    const mm = value => Number.isFinite(value) ? value.toFixed(3) : 'n/a';
-    return [label, mm(row?.sampled_max ?? row?.max), mm(row?.p95),
-      Number.isFinite(row?.within_tolerance) ? `${(100 * row.within_tolerance).toFixed(1)}%` : 'n/a'];
-  });
-}
 
-function compareClear() {
-  for (const child of [...compareMarks.children]) {
-    compareMarks.remove(child);
-    child.geometry.dispose(); child.material.dispose();
-  }
-  comparePainted = null;
-}
 
 function compareInvalidate(reason = 'CAD changed. Waiting for the rebuilt comparison.') {
   const entry = parts.get(current);
@@ -2326,186 +1772,6 @@ function compareInvalidate(reason = 'CAD changed. Waiting for the rebuilt compar
   comparePanel(entry);
 }
 
-function compareSamples(entry, metrics, tolerance) {
-  if (!renderer || !mesh || !metrics || mesh.userData.token !== entry.token || compareMap === 'off') { compareClear(); return; }
-  const allDistances = ['part', 'target'].flatMap(side => metrics.samples?.[side]?.distances || []).filter(Number.isFinite);
-  const automatic = Math.max(tolerance + 0.001, ...allDistances, tolerance * 2);
-  const high = compareAuto ? automatic : Math.max(tolerance + 0.001, compareScale);
-  const key = [entry.name, entry.token, entry.target.stamp, tolerance, compareMap, high, compareThrough].join(':');
-  if (comparePainted === key) { compareMarks.position.copy(mesh.position); return; }
-  compareClear();
-  const sides = compareMap === 'both' ? ['part', 'target'] : [compareMap];
-  for (const side of sides) {
-    const samples = metrics.samples?.[side];
-    if (!samples?.points || !samples?.distances) continue;
-    const positions = [], colors = [];
-    const low = new THREE.Color(side === 'part' ? 0xf0c274 : 0x62c7ef);
-    const severe = new THREE.Color(side === 'part' ? 0xf87171 : 0xc084fc);
-    samples.points.forEach((point, index) => {
-      const distance = samples.distances[index];
-      if (!Array.isArray(point) || point.length !== 3 || !point.every(Number.isFinite)
-          || !Number.isFinite(distance) || distance <= tolerance) return;
-      positions.push(...point);
-      const color = low.clone().lerp(severe, Math.min(1, (distance - tolerance) / (high - tolerance)));
-      colors.push(color.r, color.g, color.b);
-    });
-    if (!positions.length) continue;
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    // Small translucent samples show the locations of disagreement without assuming
-    // the reference and the CAD viewer share triangle numbering or tessellation.
-    const material = new THREE.PointsMaterial({ size: 5, sizeAttenuation: false,
-      vertexColors: true, transparent: true, opacity: .8, depthWrite: false,
-      depthTest: !compareThrough, clippingPlanes: [plane] });
-    const points = new THREE.Points(geometry, material);
-    points.name = `comparison-${side}`;
-    points.renderOrder = 4;
-    compareMarks.add(points);
-  }
-  compareMarks.position.copy(mesh.position);
-  comparePainted = key;
-}
-
-function comparisonToleranceMatches(requested, actual) {
-  // A persisted decimal can round off a binary float's last digit. That must not
-  // leave an otherwise current comparison waiting for a value that cannot arrive.
-  return Number.isFinite(requested) && Number.isFinite(actual)
-    && Math.abs(requested - actual) <= 1e-12 * Math.max(1, Math.abs(requested), Math.abs(actual));
-}
-
-function comparisonCenteredTransform(transform, cadCenter, referenceCenter) {
-  if (!Array.isArray(transform) || transform.length !== 16 || !transform.every(Number.isFinite)
-      || ![cadCenter, referenceCenter].every(center => Array.isArray(center) && center.length === 3 && center.every(Number.isFinite))) return null;
-  const moved = [...transform];
-  for (let axis = 0; axis < 3; axis++) moved[axis * 4 + 3] += cadCenter[axis] - referenceCenter[axis];
-  return moved;
-}
-
-function comparisonMatrix(transform) {
-  if (!Array.isArray(transform) || transform.length !== 16 || !transform.every(Number.isFinite)) return null;
-  return new THREE.Matrix4().set(...transform);
-}
-
-function comparisonTransform(matrix) {
-  const e = matrix.elements;
-  return [e[0], e[4], e[8], e[12], e[1], e[5], e[9], e[13], e[2], e[6], e[10], e[14], e[3], e[7], e[11], e[15]];
-}
-
-function comparisonRigid(transform) {
-  const matrix = comparisonMatrix(transform);
-  if (!matrix) return null;
-  const position = new THREE.Vector3(), rotation = new THREE.Quaternion(), scale = new THREE.Vector3();
-  matrix.decompose(position, rotation, scale);
-  const euler = new THREE.Euler().setFromQuaternion(rotation, 'XYZ');
-  return {
-    translation: position.toArray(),
-    rotation: [euler.x, euler.y, euler.z].map(THREE.MathUtils.radToDeg),
-  };
-}
-
-function comparisonRigidTransform(values) {
-  if (!values || !values.every(Number.isFinite)) return null;
-  const [tx, ty, tz, rx, ry, rz] = values;
-  const rotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(
-    THREE.MathUtils.degToRad(rx), THREE.MathUtils.degToRad(ry), THREE.MathUtils.degToRad(rz), 'XYZ'));
-  const matrix = new THREE.Matrix4().compose(new THREE.Vector3(tx, ty, tz), rotation, new THREE.Vector3(1, 1, 1));
-  return comparisonTransform(matrix);
-}
-
-function comparisonPreview(transform, reason) {
-  const entry = parts.get(current), ghost = mesh?.getObjectByName('target');
-  if (!entry?.target || !comparisonMatrix(transform) || !ghost || mesh.userData.token !== entry.token) return;
-  if (comparePending.get(current)?.error) comparePending.delete(current);
-  comparePreview.set(current, { transform: [...transform], reason });
-  ghost.matrixAutoUpdate = false;
-  ghost.matrix.set(...transform);
-  ghost.matrixWorldNeedsUpdate = true;
-  compareClear();
-  comparePanel(entry);
-}
-
-function compareAlignment(action) {
-  const entry = parts.get(current), target = entry?.target;
-  if (!Array.isArray(target?.transform)) return;
-  const preview = comparePreview.get(current);
-  let transform = [...(preview?.transform || target.transform)];
-  if (action === 'original') {
-    comparisonPreview([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 'Original coordinates preview. Apply to save it.');
-    return;
-  }
-  if (action === 'center') {
-    const reference = mesh?.getObjectByName('target');
-    if (!reference || entry.error || mesh.userData.token !== entry.token) return;
-    mesh.updateMatrixWorld(true);
-    const cad = new THREE.Box3();
-    for (const child of [...modelNodes(), mesh.getObjectByName('target')].filter(Boolean)) {
-      if (child.isMesh && child.name !== 'target' && componentInfo(child).role !== 'context') cad.expandByObject(child, true);
-    }
-    const referenceBox = new THREE.Box3().setFromObject(reference, true);
-    if (cad.isEmpty() || referenceBox.isEmpty()) return;
-    const cadCenter = mesh.worldToLocal(cad.getCenter(new THREE.Vector3())).toArray();
-    const referenceCenter = mesh.worldToLocal(referenceBox.getCenter(new THREE.Vector3())).toArray();
-    transform = comparisonCenteredTransform(transform, cadCenter, referenceCenter);
-    if (!transform) return;
-    comparisonPreview(transform, 'Centered preview. Apply to save it.');
-    return;
-  }
-  if (action === 'cancel') {
-    if (typeof datumPreview !== 'undefined') { datumPreview = null; document.getElementById('datumapply').disabled = true; }
-    comparePreview.delete(current);
-    if (comparePending.get(current)?.error) comparePending.delete(current);
-    const reference = mesh?.getObjectByName('target');
-    if (reference) { reference.matrixAutoUpdate = false; reference.matrix.set(...target.transform); reference.matrixWorldNeedsUpdate = true; }
-    comparePanel(entry);
-    return;
-  }
-  if (action !== 'apply' && action !== 'lock') return;
-  if (!sock || sock.readyState !== WebSocket.OPEN) return;
-  if (preview) preview.reason = 'Saving alignment. Measuring again…';
-  compareInvalidate('Saving alignment. Measuring again…');
-  comparePending.get(current).transform = transform;
-  sock.send(JSON.stringify({ type: 'target_settings', name: current, transform }));
-}
-
-function comparisonWorst(metrics) {
-  const raw = metrics?.worst_regions || metrics?.regions;
-  if (Array.isArray(raw)) return raw;
-  if (!raw || typeof raw !== 'object') return [];
-  return Object.entries(raw).flatMap(([side, regions]) => Array.isArray(regions)
-    ? regions.map(region => ({ side, ...region })) : []);
-}
-
-function comparisonAbove(metrics, tolerance) {
-  if (typeof metrics?.detected_above_tolerance === 'boolean') return metrics.detected_above_tolerance;
-  return ['part', 'target'].some(side => {
-    const row = metrics?.[side];
-    return Number.isFinite(row?.sampled_max ?? row?.max) && (row.sampled_max ?? row.max) > tolerance;
-  });
-}
-
-function comparisonFocus(region) {
-  const point = region?.position_mm || region?.point || region?.center || region?.where;
-  if (!mesh || !Array.isArray(point) || point.length !== 3 || !point.every(Number.isFinite)) return;
-  if (region.direction === 'part_to_target') compareMap = 'part';
-  if (region.direction === 'target_to_part') compareMap = 'target';
-  const at = new THREE.Vector3(...point).add(mesh.position);
-  const motion = at.clone().sub(controls.target);
-  controls.target.copy(at);
-  camera.position.add(motion);
-  controls.update();
-  comparePanel(parts.get(current));
-}
-
-function comparisonTransformFields(transform) {
-  const rigid = comparisonRigid(transform);
-  if (!rigid) return;
-  const values = [...rigid.translation, ...rigid.rotation];
-  document.querySelectorAll('#comparetransform input').forEach((input, index) => {
-    if (document.activeElement !== input) input.value = values[index].toFixed(index < 3 ? 3 : 1);
-  });
-  document.getElementById('comparesummary').textContent = `Translation ${rigid.translation.map(v => v.toFixed(3)).join(', ')} mm · rotation ${rigid.rotation.map(v => v.toFixed(1)).join(', ')}°`;
-}
 
 function comparePanel(entry) {
   savedInspectionState(entry);
@@ -2676,19 +1942,7 @@ document.getElementById('compareunits').onchange = event => {
   compareInvalidate('Source units changed. Reloading the reference…');
   sock.send(JSON.stringify({ type: 'target_settings', name: current, units: event.target.value }));
 };
-document.getElementById('comparetolerance').onchange = event => {
-  inspectionToleranceOverride = null;
-  const tolerance = Number(event.target.value);
-  if (!Number.isFinite(tolerance) || tolerance < 0.001 || !event.target.value.trim()) {
-    event.target.setCustomValidity('Enter a tolerance of at least 0.001 mm.');
-    event.target.reportValidity(); return;
-  }
-  event.target.setCustomValidity('');
-  if (!sock || sock.readyState !== WebSocket.OPEN || !current) return;
-  compareInvalidate('Tolerance changed. Measuring again…');
-  comparePending.get(current).tolerance_mm = tolerance;
-  sock.send(JSON.stringify({ type: 'target_settings', name: current, tolerance_mm: tolerance }));
-};
+;
 
 // Source filtering is a preview until explicitly saved; measurements keep using the saved reference.
 let importPreview = null;
@@ -2700,58 +1954,8 @@ function importPanel(entry) {
   if (!importPreview && entry?.target?.metrics && document.getElementById('importstatus').textContent.startsWith('Selection saved')) document.getElementById('importstatus').textContent = 'Selection saved. Comparison updated.';
   document.getElementById('importprovenance').textContent = `${record.source.name} · ${record.units.input} → mm · ${record.components.length} component groups · ${record.excluded_components.length} excluded. ${record.texture ? 'Texture preserved: ' + record.texture.path : 'No image texture'}. Source SHA256: ${record.source.sha256}.`;
 }
-function importCancel() {
-  if (importPreview) {
-    const {root, original, owner, source} = importPreview;
-    root.removeFromParent(); referenceDispose(root, false); referenceDispose(source, true);
-    if (owner === mesh) {
-      // Alignment previews can move the source root while the saved reference is detached.
-      original.matrix.copy(root.matrix); original.matrixAutoUpdate = root.matrixAutoUpdate;
-      original.matrixWorldNeedsUpdate = true;
-      owner.add(original);
-    } else referenceDispose(original, false);
-  }
-  importPreview = null;
-  document.getElementById('importselection').hidden = true;
-  document.getElementById('importcomponentlist').replaceChildren();
-  document.getElementById('importstatus').textContent = '';
-}
-function importVisibility() {
-  if (!importPreview) return;
-  const keep = new Set([...document.querySelectorAll('#importcomponentlist input:checked')].map(input => input.value));
-  importPreview.root.traverse(node => { if (node.name.startsWith('component-')) node.visible = keep.has(node.name); });
-  document.getElementById('importapply').disabled = !keep.size;
-  document.getElementById('importstatus').textContent = `Preview: ${keep.size} of ${importPreview.record.components.length} component groups included. Measurements still use the saved reference until you save.`;
-}
-async function importLanded(msg) {
-  if (msg.name !== current) return;
-  if (msg.error) { document.getElementById('importstatus').textContent = msg.error; return; }
-  if (msg.saved) { importCancel(); document.getElementById('importstatus').textContent = 'Selection saved. Rebuilding comparison…'; return; }
-  if (!msg.glb || msg.stamp !== parts.get(current)?.target?.stamp) return;
-  const entry = parts.get(current), owner = mesh;
-  try {
-    const bytes = Uint8Array.from(atob(msg.glb), char => char.charCodeAt(0));
-    const gltf = await loader.parseAsync(bytes.buffer, '');
-    const source = referenceSanitizeScene(gltf.scene);
-    if (owner !== mesh || msg.stamp !== parts.get(current)?.target?.stamp) { referenceDispose(source, true); return; }
-    importCancel();
-    const original = owner.getObjectByName('target');
-    if (!original) { referenceDispose(source, true); throw new Error('Wait for the reference to finish loading.'); }
-    const root = referenceInstance(source, 1);
-    root.matrix.copy(original.matrix); root.matrixAutoUpdate = false;
-    original.removeFromParent(); owner.add(root);
-    importPreview = {name:current, token:entry.token, root, original, owner, source, record:msg.import};
-    const list = document.getElementById('importcomponentlist'), excluded = new Set(entry.target.import.excluded_components);
-    for (const component of msg.import.components) {
-      const label = document.createElement('label'), input = document.createElement('input');
-      input.type = 'checkbox'; input.value = component.id; input.checked = !excluded.has(component.id);
-      input.onchange = importVisibility;
-      label.append(input, document.createTextNode(`${component.id}: ${component.triangles.toLocaleString()} triangles${component.grouped_fragments ? ' (small fragments grouped)' : ''}`)); list.append(label);
-    }
-    document.getElementById('importselection').hidden = false;
-    inspectionSetMode('reference'); importVisibility();
-  } catch (error) { document.getElementById('importstatus').textContent = `Could not preview source: ${error.message}`; }
-}
+
+
 document.getElementById('importpreview').onclick = () => {
   if (!sock || sock.readyState !== WebSocket.OPEN) return;
   document.getElementById('importstatus').textContent = 'Loading preserved source components…';
@@ -2764,7 +1968,8 @@ document.getElementById('importapply').onclick = () => {
   document.getElementById('importapply').disabled = true;
   document.getElementById('importstatus').textContent = 'Saving derived reference; original assets remain intact…';
   sock.send(JSON.stringify({type:'target_components',name:current,stamp:parts.get(current)?.target?.stamp,excluded}));
-};
+}
+document.getElementById('comparetolerance').onchange = comparisonToleranceChanged;
 
 const compareFile = document.getElementById('compareref');
 document.getElementById('compareadd').onclick = () => compareFile.click();
@@ -3203,53 +2408,6 @@ function writerSourceVisible(source) {
   return true;
 }
 
-function sectionUpdate() {
-  const on = cutting && !!mesh;
-  cap.visible = on;
-  for (const w of writers) w.visible = on && writerSourceVisible(w.userData.source);
-  if (!on) { plane.constant = PARKED; return; }
-  // A freshly attached reference must inherit the plated part transform before bounds are read.
-  mesh.updateMatrixWorld(true);
-  // The group has no geometry of its own, and 'context' scenery must not stretch the
-  // cut range: the slider spans the printed parts, in world space, joints included.
-  const box = new THREE.Box3();
-  const reference = mesh.getObjectByName('target');
-  for (const c of [...modelNodes(), ...referenceMeshes(reference)]) if (componentInfo(c).role !== 'context') box.expandByObject(c);
-  if (box.isEmpty()) { plane.constant = PARKED; return; }
-  const lo = box.min[cutAxis], hi = box.max[cutAxis];
-  // The cut faces the camera as it stood when the section opened or the axis was
-  // picked, so the first look always shows the cross-section instead of the part's
-  // own outside. Chosen once and then left alone: a side that follows the camera
-  // swaps the surviving half mid-orbit, and with the slider near an end that
-  // collapses the whole part to a sliver the moment the view crosses the plane.
-  if (!cutSign) cutSign = camera.position[cutAxis] >= (lo + hi) / 2 ? 1 : -1;
-  // Normalized so dragging right always keeps more material, whichever side survives.
-  const t = inspectionMode === 'section' || cutSign === 1 ? cutAt : 1 - cutAt;
-  // A hair inside the bounds at each end, so neither extreme is a cut through nothing.
-  // An absolute ?cut position gets the same treatment: clamped just inside, so z:0mm
-  // cuts the bottom skin instead of grazing the surface and drawing nothing. It sits
-  // where it says regardless of cutSign, which only picks the half that survives.
-  // x and y positions are quoted in the part's own coordinates, z from the bed, so
-  // the centering shift is added back for the first two and already folded into z.
-  const mm = cutMm === null ? null : inspectionMode === 'section' || cutAxis !== 'z' ? cutMm + mesh.position[cutAxis] : cutMm;
-  const at = mm !== null && inspectionMode === 'section' ? mm : mm !== null
-    ? Math.min(hi - (hi - lo) * 0.002, Math.max(lo + (hi - lo) * 0.002, mm))
-    : lo + (hi - lo) * (0.02 + 0.96 * t);
-  const dir = AXES[cutAxis];
-  plane.normal.set(-cutSign * dir[0], -cutSign * dir[1], -cutSign * dir[2]);  // keeps the side the normal points at
-  plane.constant = cutSign * at;
-  const span = box.getSize(new THREE.Vector3()).length();
-  cap.scale.set(span, span, 1);
-  // Centred on the part, not on coplanarPoint, which is where the plane passes the
-  // world origin. A part's own origin is a modeling datum: the shelf lives entirely at
-  // x <= 0, so an origin-centred cap left the far 49mm of its cut face bare and spent
-  // half its area on empty space.
-  plane.projectPoint(box.getCenter(new THREE.Vector3()), cap.position);
-  cap.lookAt(cap.position.x - plane.normal.x, cap.position.y - plane.normal.y,
-             cap.position.z - plane.normal.z);
-  sectionDrawingKey = null;
-  inspectionSave();
-}
 
 // ---- download ----
 // This is the configurator. The sliders already hold an exploration, so the file
@@ -5039,40 +4197,8 @@ function symmetryOptions(entry) {
     sample_budget:number('symmetrybudget'), timeout_s:number('symmetryseconds'), memory_limit_mb:number('symmetrymemory'), max_angle_deg:number('symmetryangle'),
     reference_bounds_mm:region?.bounds_mm || null};
 }
-function symmetryClearPlane() {
-  if (symmetryPlane) { scene.remove(symmetryPlane); symmetryPlane.geometry.dispose(); symmetryPlane.material.dispose(); symmetryPlane = null; }
-}
-function symmetryDrawPlane(report, force = false) {
-  symmetryClearPlane();
-  if (!mesh || !report?.plane || (!force && (!symmetryElement('symmetryshow').checked || !compareOpen))) return;
-  const bounds = new THREE.Box3().setFromObject(mesh), size = bounds.getSize(new THREE.Vector3()).length();
-  const normal = new THREE.Vector3(...report.plane.normal);
-  const center = bounds.getCenter(new THREE.Vector3()).sub(mesh.position);
-  center.addScaledVector(normal, report.plane.offset_mm - center.dot(normal)).add(mesh.position);
-  symmetryPlane = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicMaterial({color:0xffcb6b,transparent:true,opacity:.17,side:THREE.DoubleSide,depthTest:false,depthWrite:false}));
-  symmetryPlane.name = 'symmetry-evidence-plane';
-  symmetryPlane.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),normal);
-  symmetryPlane.position.copy(center); scene.add(symmetryPlane);
-}
-function symmetryFeatureSignature(entry) {
-  return JSON.stringify((entry?.target?.regions || []).filter(r => r.feature).map(r => [r.name,r.feature]));
-}
-function symmetryCategoryRows(report) {
-  const fixed = value => Number.isFinite(value) ? value.toFixed(4) : 'unknown';
-  return [['Category','Count / unmatched','Negative max mm','Positive max mm','Threshold mm','Result','On-plane max mm'],
-    ...[['Authored CAD centers',report.feature_centers?.cad_centers],
-        ['Reference annotations',report.feature_centers?.reference_points],
-        ['Periodic seams',report.cad?.periodic_seams]].map(([label,category]) =>
-      [label,`${category?.count || 0} total, ${category?.unmatched_count || 0} unmatched`,fixed(category?.sides?.negative?.max_mm),
-        fixed(category?.sides?.positive?.max_mm),fixed(category?.tolerance_mm),(category?.status || 'not_assessed').replaceAll('_',' '),fixed(category?.sides?.on_plane?.max_mm)])];
-}
-function symmetryFresh(entry, report) {
-  return report?.status === 'measured' && report.token === entry?.token && !entry.error && !entry.target?.stale
-    && !comparePreview.has(entry.name) && !comparePending.has(entry.name)
-    && (!report.feature_records || JSON.stringify(report.feature_records) === symmetryFeatureSignature(entry))
-    && !(entry.name === current && featureDirty)
-    && JSON.stringify(report.options) === JSON.stringify(symmetryOptions(entry));
-}
+
+
 function symmetryPanel(entry) {
   const region = symmetryElement('symmetryregion'), selected = region.value;
   const regions = (entry?.target?.regions || []).filter(r => r.bounds_mm);

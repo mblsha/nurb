@@ -130,11 +130,22 @@ assert.equal(state.inspectionActions(flow).verify,false);
 """)
 
 
-def test_module_is_shipped_and_served_offline(tmp_path):
+@pytest.mark.parametrize(('filename','export'),[
+    ('inspection-state.js','inspectionTransition'),
+    ('inspection-viewer.js','createInspectionController'),
+])
+def test_module_is_shipped_and_served_offline(tmp_path,filename,export):
+    import posixpath
+    import re
     package = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert '"src/nurb/inspection-state.js"' in package
+    assert f'"src/nurb/{filename}"' in package
     server = Server(tmp_path, port=7373, draft=False)
-    response = asyncio.run(server.http(None, SimpleNamespace(path="/inspection-state.js")))
+    response = asyncio.run(server.http(None, SimpleNamespace(path='/'+filename)))
     assert response.status_code == 200
     assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"
-    assert b"export function inspectionTransition" in response.body
+    assert f'export function {export}'.encode() in response.body
+    for dependency in re.findall(r"from\s+['\"]([^'\"]+)",response.body.decode()):
+        assert dependency.startswith(('./','/')), 'Inspection imports must resolve to shipped local assets.'
+        imported = asyncio.run(server.http(None, SimpleNamespace(path=posixpath.normpath('/'+dependency))))
+        assert imported.status_code == 200
+        assert imported.headers['Content-Type'].startswith('text/javascript')

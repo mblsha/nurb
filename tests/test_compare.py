@@ -787,18 +787,6 @@ def test_compare_text_names_actionable_worst_regions(tmp_path, monkeypatch, caps
     assert "excess " in output
 
 
-def test_viewer_discards_a_ghost_loaded_for_a_replaced_mesh_group():
-    from nurb import server as server_mod
-
-    viewer = server_mod.VIEWER.read_text(encoding="utf-8")
-    ghost = viewer.split("async function ghostAttach", 1)[1].split(
-        "// ---- orientation cube ----", 1
-    )[0]
-    assert "const group = mesh;" in ghost
-    assert "mesh !== group" in ghost
-    assert "group.add(g);" in ghost
-
-
 def test_a_missing_target_file_reports_instead_of_breaking_the_build(tmp_path):
     server = project(tmp_path)
     (tmp_path / "scans" / "original.stl").unlink()

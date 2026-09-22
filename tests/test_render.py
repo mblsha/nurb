@@ -110,7 +110,10 @@ def test_real_viewer_loads_inspection_coordinator_and_primary_flow(tmp_path):
                 "1 · Select", "2 · Inspect sections", "3 · Verify", "4 · Save or capture",
             ]
             assert not page.locator("#compareadvanced").get_attribute("open")
-            assert any(entry.endswith("/inspection-state.js") for entry in page.evaluate("performance.getEntriesByType('resource').map(entry=>entry.name)"))
+            loaded=page.evaluate("performance.getEntriesByType('resource').map(entry=>entry.name)")
+            for asset in ('inspection-state.js','inspection-viewer.js'):
+                assert any(entry.endswith('/'+asset) for entry in loaded)
+            assert page.evaluate("async()=>typeof (await import('/inspection-viewer.js')).createInspectionController")=='function'
             page.screenshot(path=str(tmp_path / "inspection-primary-flow.png"))
             browser.close()
     finally:

@@ -8,30 +8,32 @@ import subprocess
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-VIEWER = (ROOT / "src/nurb/viewer.html").read_text()
+INSPECTION_VIEWER = (ROOT / "src/nurb/inspection-viewer.js").as_uri()
 THREE = (ROOT / "src/nurb/vendor/three/build/three.module.min.js").as_uri()
 INSPECTION_STATE = (ROOT / "src/nurb/inspection-state.js").as_uri()
 
 
-def js(functions, checks):
+def js(functions, checks, bindings=()):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node.js is needed for viewer geometry checks")
     source = f"""import * as THREE from {json.dumps(THREE)};
 import assert from 'node:assert/strict';
 import * as InspectionState from {json.dumps(INSPECTION_STATE)};
+import * as InspectionViewer from {json.dumps(INSPECTION_VIEWER)};
 const {{inspectionActions,inspectionGuidance,inspectionHydrateVerification,inspectionInitial,inspectionTransition,policyFromProvenance,
   sectionSeriesAdd,sectionSeriesInitial,sectionSeriesRemove,sectionSeriesSelect,sectionSeriesSelected,sectionSeriesUpdate}}=InspectionState;
 """
-    for start, end in functions:
-        source += start + VIEWER.split(start, 1)[1].split(end, 1)[0] + "\n"
+    accessors = "\n".join(f"get {name}() {{ return {name}; }}, set {name}(value) {{ {name}=value; }}," for name in bindings)
+    source += "const liveBindings = {" + accessors + "};\n"
+    source += "const {" + ",".join(functions) + "} = {...InspectionViewer,...InspectionViewer.createInspectionController(liveBindings)};\n"
     result = subprocess.run([node, "--input-type=module", "-"], input=source + checks,
                             encoding="utf-8", capture_output=True)
     assert result.returncode == 0, result.stderr
 
 
 def test_section_closes_solids_in_part_coordinates_and_preserves_nested_holes():
-    js([("function sectionSegments(", "function sectionDifference(")], """
+    js(['sectionSegments', 'sectionAssemble', 'sectionContours', 'sectionContoursMany', 'sectionMaskDistance', 'sectionMaskClassify', 'sectionScaleLabelY'], """
 const identity = new THREE.Matrix4();
 const square = new THREE.Shape(); square.moveTo(-5,-5); square.lineTo(5,-5);
 square.lineTo(5,5); square.lineTo(-5,5); square.closePath();
@@ -51,8 +53,25 @@ assert.equal(sectionContours(islands, identity, 1, .317).valid, true);
 """)
 
 
+def test_evidence_renderer_uses_live_authoritative_state_and_busy_status():
+    js([], """
+const fields={evidenceguidance:{},verifyrun:{},verifycancel:{},inspectionworkflow:{dataset:{}},inspect:{},save:{},capture:{}};
+const runtime={document:{getElementById:id=>fields[id]},featureField:id=>fields[id],inspectionField:id=>fields[id],inspectionBusy:false,
+ evidenceWorkflow:inspectionInitial({part:'seal',token:'build',interfaceId:'rim',referenceReady:true,freshness:'current'})};
+const controller=InspectionViewer.createInspectionController(runtime);
+controller.evidenceRender();assert.equal(fields.verifyrun.disabled,false);assert.equal(fields.capture.disabled,true);
+runtime.evidenceWorkflow=inspectionTransition(runtime.evidenceWorkflow,{type:'verify-requested',requestId:'request'});
+controller.evidenceRender();assert.equal(fields.verifyrun.disabled,true);assert.equal(fields.verifycancel.disabled,false);
+assert.equal(fields.inspectionworkflow.dataset.phase,'queued');
+runtime.evidenceWorkflow=inspectionTransition(runtime.evidenceWorkflow,{type:'verify-measured',token:'build',requestId:'request'});
+runtime.evidenceWorkflow.source='verified';
+controller.evidenceRender();assert.equal(fields.capture.disabled,false);
+runtime.inspectionBusy=true;controller.evidenceRender();assert.equal(fields.save.disabled,true);assert.equal(fields.capture.disabled,true);
+""")
+
+
 def test_section_refuses_open_meshes_and_coplanar_boundaries_instead_of_filling_them():
-    js([("function sectionSegments(", "function sectionDifference(")], """
+    js(['sectionSegments', 'sectionAssemble', 'sectionContours', 'sectionContoursMany', 'sectionMaskDistance', 'sectionMaskClassify', 'sectionScaleLabelY'], """
 const geometry = new THREE.BufferGeometry();
 geometry.setAttribute('position', new THREE.Float32BufferAttribute([-1,0,-1, 1,0,1, 0,2,-1],3));
 const open = sectionContours(geometry, new THREE.Matrix4(), 2, 0);
@@ -66,7 +85,7 @@ assert.equal(empty.valid,true); assert.equal(empty.segments.length,0);
 
 
 def test_component_identity_is_preserved_and_visibility_does_not_change_geometry():
-    js([("function componentInfo(", "function inspectionSave(")], """
+    js(['componentInfo', 'modelNodes'], """
 const mesh = new THREE.Group();
 const a = new THREE.Mesh(new THREE.BoxGeometry()), b = new THREE.Mesh(new THREE.BoxGeometry());
 a.name = 'fixed-a'; a.userData.nurb = {id:'socket-1',label:'Left socket',role:'part'};
@@ -75,11 +94,11 @@ assert.deepEqual(componentInfo(a), {id:'socket-1',label:'Left socket',role:'part
 assert.equal(componentInfo(b).role,'context');
 const before = a.geometry.attributes.position.array.slice(); a.visible = false;
 assert.equal(modelNodes().length,2); assert.deepEqual(a.geometry.attributes.position.array,before);
-""")
+""", bindings=['mesh'])
 
 
 def test_datum_preview_with_no_written_files_stays_a_preview_until_apply():
-    js([("function datumLanded(", "function regionValues(")], """
+    js(['datumLanded'], """
 const current = 'part', parts = new Map([['part',{token:'a'}]]);
 let datumPreview = {name:'part',token:'a',operation:{kind:'axis'}}, previewed = null, mode = null;
 const fields = {datumstatus:{textContent:''},datumapply:{disabled:true}};
@@ -94,11 +113,11 @@ assert.match(fields.datumstatus.textContent,/Preview ready/);
 datumLanded({name:'part',token:'a',written:['parts/part.md']});
 assert.equal(datumPreview,null); assert.equal(fields.datumapply.disabled,true);
 assert.equal(fields.datumstatus.textContent,'Alignment saved.');
-""")
+""", bindings=['comparisonPreview', 'current', 'datumPreview', 'datumReset', 'document', 'inspectionSetMode', 'parts'])
 
 
 def test_section_tolerance_mutes_small_offsets_but_preserves_larger_material_defects():
-    js([("function sectionMaskDistance(", "function sectionDifference(")], """
+    js(['sectionMaskDistance', 'sectionMaskClassify', 'sectionScaleLabelY'], """
 const width=12,height=5,cad=new Uint8Array(width*height),ref=new Uint8Array(width*height);
 for(let y=1;y<4;y++) for(let x=2;x<7;x++) {cad[y*width+x]=1;ref[y*width+x+1]=1;}
 cad[2*width+10]=1;
@@ -115,8 +134,7 @@ assert.equal(distance[0],8);assert.equal(distance[12],0);assert.equal(distance[1
 
 
 def test_nested_component_groups_select_and_hide_descendant_leaves():
-    js([("function componentInfo(", "function inspectionSave("),
-        ("function componentAncestors(", "function componentPanel(")], """
+    js(['componentInfo', 'modelNodes', 'componentAncestors', 'componentMembers', 'componentResolveHidden', 'componentHidden'], """
 const mesh = new THREE.Group(), inspectionGroups = new Map([
   ['mount',{id:'mount',parent:null}],['mount/insert',{id:'mount/insert',parent:'mount'}]]);
 const a = new THREE.Mesh(), b = new THREE.Mesh();
@@ -129,17 +147,19 @@ assert.deepEqual(componentMembers('mount/insert'),[a]);
 assert.equal(componentHidden(a),true);assert.equal(componentHidden(b),true);
 hiddenComponents.clear();hiddenComponents.add('mount/insert');
 assert.equal(componentHidden(a),true);assert.equal(componentHidden(b),false);
-""")
+""", bindings=['componentAncestors', 'hiddenComponents', 'inspectionGroups', 'mesh', 'modelNodes'])
 
 
 def test_embedded_section_scale_reserves_space_above_the_viewer_footer():
-    section = VIEWER.split("function sectionDifference()", 1)[1].split("function referenceInspectionLanded", 1)[0]
-    assert "mm / 100 px`, 16, height - (embed ? 44 : 18)" in section
+    js(['sectionScaleLabelY'], """
+assert.equal(sectionScaleLabelY(480,true),436);
+assert.equal(sectionScaleLabelY(480,false),462);
+assert.ok(sectionScaleLabelY(480,true) < sectionScaleLabelY(480,false));
+""")
 
 
 def test_datum_apply_rejects_other_parts_and_new_builds_and_uses_the_captured_token():
-    js([("function datumReset(", "function inspectionVector("),
-        ("function datumSend(", "document.getElementById('datumkind').onchange")], """
+    js(['datumReset', 'datumSend'], """
 let current='A',datumPreview=null;
 const parts=new Map([['A',{token:'a1'}],['B',{token:'b1'}]]),comparePreview=new Map(),sent=[];
 const fields={datumstatus:{textContent:''},datumapply:{disabled:false}};
@@ -158,12 +178,11 @@ current='A';datumSend(false);datumPreview.transform=[1];parts.set('A',{token:'a2
 assert.equal(sent.length,2);assert.equal(datumPreview,null);
 datumSend(false);datumPreview.transform=[1];datumSend(true);
 assert.equal(sent.length,4);assert.equal(sent[3].token,'a2');assert.equal(sent[3].name,'A');assert.equal(sent[3].save,true);
-""")
+""", bindings=['WebSocket', 'comparePreview', 'current', 'datumOperation', 'datumPreview', 'datumReset', 'document', 'parts', 'sock'])
 
 
 def test_switching_parts_resets_the_pending_datum_preview():
-    js([("function inspectionRestore(", "function componentAncestors("),
-        ("function datumReset(", "function inspectionVector(")], """
+    js(['inspectionRestore', 'datumReset'], """
 let inspectionToleranceOverride=.3;
 let inspectionFor='A',inspectionFrameBox={},hiddenComponents=new Set(),inspectionRegionName='old',inspectionRegionError='old',sectionDrawingKey='old';
 let datumPreview={name:'A',token:'a1',operation:{},transform:[1]};
@@ -173,11 +192,11 @@ const document={getElementById:id=>fields[id]};
 inspectionRestore('B');
 assert.equal(datumPreview,null);assert.equal(fields.datumapply.disabled,true);assert.equal(fields.datumstatus.textContent,'');
 assert.equal(comparePreview.has('A'),false);assert.equal(inspectionFor,'B');assert.equal(inspectionToleranceOverride,null);
-""")
+""", bindings=['INSPECTION_MODES', 'comparePreview', 'cutAt', 'cutAxis', 'cutMm', 'datumPreview', 'datumReset', 'document', 'hiddenComponents', 'inspectionFor', 'inspectionFrameBox', 'inspectionKey', 'inspectionMode', 'inspectionRegionError', 'inspectionRegionName', 'inspectionToleranceOverride', 'localStorage', 'q', 'sectionDrawingKey', 'view'])
 
 
 def test_subpixel_section_tolerance_does_not_accept_a_full_pixel_gap():
-    js([("function sectionMaskDistance(", "function sectionDifference(")], """
+    js(['sectionMaskDistance', 'sectionMaskClassify', 'sectionScaleLabelY'], """
 const cad=Uint8Array.from([1,0,0]),reference=Uint8Array.from([0,1,0]);
 for(const tolerance of [.00001,.2,.999]) assert.deepEqual(Array.from(sectionMaskClassify(cad,reference,3,1,tolerance)),[2,3,0]);
 assert.deepEqual(Array.from(sectionMaskClassify(cad,reference,3,1,1)),[1,1,0]);
@@ -185,8 +204,7 @@ assert.deepEqual(Array.from(sectionMaskClassify(cad,reference,3,1,1)),[1,1,0]);
 
 
 def test_initial_hide_resolves_ids_and_repeated_labels_for_leaves_and_groups():
-    js([("function componentInfo(", "function inspectionSave("),
-        ("function componentAncestors(", "function componentPanel(")], """
+    js(['componentInfo', 'modelNodes', 'componentAncestors', 'componentMembers', 'componentResolveHidden', 'componentHidden'], """
 const mesh=new THREE.Group(),inspectionGroups=new Map([
  ['a',{id:'a',label:'Assembly'}],['b',{id:'b',label:'Assembly'}]]);
 const leaf=(id,label,parent)=>{const n=new THREE.Mesh(new THREE.BoxGeometry());n.userData.nurb={id,label,parent,role:'part'};mesh.add(n);return n;};
@@ -198,13 +216,11 @@ hiddenComponents=new Set(['Assembly']);componentResolveHidden();
 assert.deepEqual([...hiddenComponents],['a','b']);assert.equal(componentHidden(one),true);assert.equal(componentHidden(two),true);
 hiddenComponents=new Set(['body']);componentResolveHidden();assert.equal(componentHidden(other),true);
 assert.deepEqual(componentMembers('Socket'),[one,two]);
-""")
+""", bindings=['componentAncestors', 'hiddenComponents', 'inspectionGroups', 'mesh', 'modelNodes'])
 
 
 def test_region_labels_resolve_and_unresolved_capture_fails_instead_of_using_whole_model():
-    js([("function componentInfo(", "function inspectionSave("),
-        ("function componentAncestors(", "function componentPanel("),
-        ("function inspectionSelectedMetrics(", "function inspectionRegions(")], """
+    js(['componentInfo', 'modelNodes', 'componentAncestors', 'componentMembers', 'componentResolveHidden', 'componentHidden', 'inspectionSelectedMetrics', 'inspectionRegionStatus', 'inspectionRegionBounds', 'inspectionSelectRegion'], """
 const current='assembly',mesh=new THREE.Group(),inspectionGroups=new Map();
 const board=new THREE.Mesh(new THREE.BoxGeometry(4,6,2));board.userData.nurb={id:'board_1',label:'Board',role:'part'};mesh.add(board);
 const entry={target:{regions:[{name:'board fit',component:'Board'},{name:'missing',component:'Missing'}]}};
@@ -217,13 +233,11 @@ assert.equal(inspectionSelectRegion('missing',true),false);assert.equal(framed.l
 assert.match(window.__nurb.error,/no resolvable bounds/);
 entry.target.metrics={inspection_regions:[{name:'board fit',status:'partial',bounds_mm:{min:[1,2,3],max:[5,8,9]}}]};
 assert.deepEqual(inspectionRegionBounds(entry,'board fit').box.min.toArray(),[1,2,3]);
-""")
+""", bindings=['comparePanel', 'componentAncestors', 'componentMembers', 'current', 'currentFrameBox', 'frame', 'hiddenComponents', 'inspectionFrameBox', 'inspectionGroups', 'inspectionRegionBounds', 'inspectionRegionError', 'inspectionRegionName', 'mesh', 'modelNodes', 'parts', 'window'])
 
 
 def test_selected_regions_show_local_stats_status_and_worst_regions_until_whole_model():
-    js([("function inspectionSelectedMetrics(", "function inspectionRegionBounds("),
-        ("function comparisonRows(", "function compareClear("),
-        ("function comparisonWorst(", "function comparisonFocus(")], """
+    js(['inspectionSelectedMetrics', 'inspectionRegionStatus', 'comparisonRows', 'comparisonWorst', 'comparisonAbove'], """
 const regional={name:'seat',status:'partial',part:{sampled_max:.6,p95:.4,within_tolerance:.5},target:null,
  detected_above_tolerance:true,worst_regions:[{position_mm:[1,2,3],peak_deviation_mm:.6}]};
 const global={part:{sampled_max:8},target:{sampled_max:9},inspection_regions:[regional]};
@@ -238,7 +252,7 @@ assert.equal(inspectionSelectedMetrics(global,'missing'),null);
 
 
 def test_region_crud_waits_for_previous_write_instead_of_replacing_unseen_regions():
-    js([("function regionSave(", "document.getElementById('regionsave').onclick")], """
+    js(['regionSave'], """
 const current='part',regionWrites=new Map(),sent=[],WebSocket={OPEN:1};
 const parts=new Map([[current,{target:{regions:[]}}]]);
 const fields={regionstatus:{textContent:''},regionname:{value:'A'},regionexisting:{value:''},regionsave:{disabled:false},regionremove:{disabled:false}};
@@ -250,11 +264,11 @@ fields.regionexisting.value='A';regionSave(true);assert.equal(sent.length,1);
 parts.set(current,{target:{regions:sent[0].regions}});regionWrites.delete(current);
 fields.regionexisting.value='';regionSave();assert.deepEqual(sent[1].regions,[{name:'A',component:'body'},{name:'B',component:'body'}]);
 fields.regionexisting.value='B';fields.regionname.value='edited';regionSave();assert.equal(sent.length,2);
-""")
+""", bindings=['WebSocket', 'current', 'document', 'parts', 'regionValues', 'regionWrites', 'sock'])
 
 
 def test_feature_sections_expire_on_rebuild_even_before_new_metrics_arrive():
-    js([("function featureEditorState(", "function featureInspect(")], """
+    js(['featureEditorState'], """
 function featureExportState() {} function featureVerifiedResult(){return null;}
 const fields={freshness:{},inspect:{},verified:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{}};
 const featureField=id=>fields[id], current='part';
@@ -268,11 +282,11 @@ assert.equal(fields.plot.hidden,true);
 assert.equal(fields.review.disabled,true);
 assert.match(fields.freshness.textContent,/stale/);
 assert.match(fields.status.textContent,/expired/);
-""")
+""", bindings=['current', 'evidenceRender', 'evidenceWorkflow', 'featureDirty', 'featureExportState', 'featureField', 'featureInspection', 'featureVerifiedResult', 'selectedFeatureRegion'])
 
 
 def test_feature_rename_preserves_identity_and_other_saved_series():
-    js([("function featureSectionValue(", "function featureEditorLoad(")], """
+    js(['featureSectionValue', 'featureSectionStore', 'featureSectionLoad', 'featureRegionValues'], """
 const previous={id:'stable-rim',feature_size_mm:.3,sections:[{name:'first'},{name:'second'}],review:{identity:{token:'old'}}};
 const selectedFeatureRegion=()=>({feature:previous});
 let featureSeries=sectionSeriesInitial(previous.sections);
@@ -289,11 +303,11 @@ assert.equal(result.feature.feature_size_mm,.3);
 assert.equal(result.feature.sections[1].name,'second');
 assert.deepEqual(result.feature.sections[0].offsets_mm,[-1,0,1]);
 assert.equal(result.feature.review.identity.token,'old');
-""")
+""", bindings=['Option', 'crypto', 'featureField', 'featureSectionStore', 'featureSectionValue', 'featureSeries', 'inspectionVector', 'selectedFeatureRegion'])
 
 
 def test_precise_verification_rejects_late_build_results():
-    js([("function verificationLanded(", "document.getElementById('verifycancel').onclick")], """
+    js(['verificationLanded'], """
 const entry={token:'new',target:{verification:{status:'running'}}};
 const parts=new Map([['part',entry]]),current='part'; let renders=0,editorUpdates=0;
 let evidenceWorkflow=inspectionInitial({part:'part',token:'new'});
@@ -313,22 +327,22 @@ verificationLanded({name:'part',token:'new',request_id:'invalid-policy',status:'
 assert.equal(entry.target.verification.request_id,'invalid-policy');assert.equal(evidenceWorkflow.verification.status,'unknown');
 verificationLanded({name:'part',token:'new',request_id:'late-result',status:'measured',replaces_request_id:'active'});
 assert.equal(entry.target.verification.request_id,'invalid-policy');
-""")
+""", bindings=['current', 'evidenceWorkflow', 'featureEditorState', 'featureInspectionLanded', 'featureVerifiedResult', 'parts', 'verificationShow'])
 
 
 def test_saved_symmetry_plane_ignores_live_panel_and_checkbox_visibility():
-    js([('function symmetryClearPlane(', 'function symmetryFeatureSignature(')], """
+    js(['symmetryClearPlane', 'symmetryDrawPlane'], """
 const scene=new THREE.Scene(),mesh=new THREE.Mesh(new THREE.BoxGeometry(5,5,5));
 let symmetryPlane=null,compareOpen=false;
 const symmetryElement=()=>({checked:false});
 const report={plane:{normal:[1,0,0],offset_mm:0}};
 symmetryDrawPlane(report);assert.equal(symmetryPlane,null);
 symmetryDrawPlane(report,true);assert.ok(symmetryPlane);assert.ok(scene.children.includes(symmetryPlane));
-""")
+""", bindings=['compareOpen', 'mesh', 'scene', 'symmetryClearPlane', 'symmetryElement', 'symmetryPlane'])
 
 
 def test_precise_verification_shows_stale_without_reusing_old_metrics():
-    js([("function verificationShow(", "function verificationLanded(")], """
+    js(['verificationShow'], """
 const current='part', verificationHistory=new Map([['part',{token:'old',status:'measured',metrics:{part:{sampled_max:0}}}]]);
 let evidenceWorkflow=inspectionInitial({part:'part',token:'new'});
 const fields={verifyresult:{replaceChildren(){this.cleared=true}},verifyrun:{},verifycancel:{},verifystatus:{}};
@@ -338,11 +352,11 @@ verificationShow({name:'part',token:'new',target:{}});
 assert.equal(fields.verifyresult.cleared,true);
 assert.match(fields.verifystatus.textContent,/stale/);
 assert.equal(fields.verifycancel.disabled,true);
-""")
+""", bindings=['document', 'evidenceRender', 'evidenceWorkflow', 'verificationHistory'])
 
 
 def test_replaced_reference_is_in_part_frame_before_a_section_is_restored():
-    js([('function sectionUpdate()', '// ---- download ----')], """
+    js(['sectionUpdate'], """
 const mesh=new THREE.Group();mesh.position.z=4;
 const cad=new THREE.Mesh(new THREE.BoxGeometry(40,24,8));mesh.add(cad);mesh.updateMatrixWorld(true);
 const reference=new THREE.Group();reference.name='target';
@@ -356,11 +370,11 @@ sectionUpdate();
 assert.equal(plane.constant/cutSign-mesh.position.z,0);
 assert.equal(ref.matrixWorld.elements[14],4);
 cutMm=1.25;sectionUpdate();assert.equal(plane.constant/cutSign-mesh.position.z,1.25);
-""")
+""", bindings=['AXES', 'PARKED', 'camera', 'cap', 'cutAt', 'cutAxis', 'cutMm', 'cutSign', 'cutting', 'inspectionMode', 'inspectionSave', 'mesh', 'modelNodes', 'plane', 'referenceMeshes', 'sectionDrawingKey', 'writerSourceVisible', 'writers'])
 
 
 def test_feature_scale_survives_editor_load_save_and_can_be_cleared_explicitly():
-    js([("function featureSectionValue(", "function featureEditorState(")], """
+    js(['featureSectionValue', 'featureSectionStore', 'featureSectionLoad', 'featureRegionValues', 'featureEditorLoad', 'featureVerifiedResult'], """
 const previous={id:'stable-rim',feature_size_mm:.3,role:'small headset lip'};
 const selectedFeatureRegion=()=>({feature:previous}), current='part', parts=new Map();
 const Option=(text,value)=>({text,value}),fields=new Map(), featureField=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,setAttribute(){},replaceChildren(){}});return fields.get(id);};
@@ -378,11 +392,11 @@ featureField('size').value='';
 assert.equal('feature_size_mm' in featureRegionValues({name:'rim'}).feature,false);
 featureEditorLoad({feature:{id:'old',feature_scale_mm:.4}});
 assert.equal(featureField('size').value,.4);
-""")
+""", bindings=['Option', 'crypto', 'current', 'document', 'evidenceWorkflow', 'featureDirty', 'featureEditorState', 'featureField', 'featureInspection', 'featureSectionLoad', 'featureSectionStore', 'featureSectionValue', 'featureSeries', 'inspectionField', 'inspectionVector', 'parts', 'selectedFeatureRegion'])
 
 
 def test_feature_exports_use_shared_download_and_discard_scale_edits_or_stale_results():
-    js([("function featureExportState(", "function featurePlot(")], """
+    js(['featureExportState', 'featureExport', 'featureExportLanded'], """
 const entry={token:'build',target:{}},parts=new Map([['part',entry]]),current='part',sent=[],downloads=[];
 const WebSocket={OPEN:1},sock={readyState:1,send:value=>sent.push(JSON.parse(value))};
 const fields={json:{},svg:{},status:{},station:{value:'0'}},featureField=id=>fields[id];
@@ -398,11 +412,11 @@ featureDirty=false;entry.target.stale=true;await featureExportLanded(result);ass
 entry.target.stale=false;await featureExportLanded(result);assert.equal(downloads.length,1);
 assert.match(fields.status.textContent,/saved/);
 entry.token='rebuilt';await featureExportLanded(result);assert.equal(downloads.length,1);
-""")
+""", bindings=['WebSocket', 'current', 'featureDirty', 'featureEditorState', 'featureField', 'featureInspection', 'parts', 'sock', 'window'])
 
 
 def test_feature_scale_identity_change_expires_contours_even_with_same_build_token():
-    js([("function featureEditorState(", "function featureInspect(")], """
+    js(['featureEditorState'], """
 const fields={freshness:{},inspect:{},verified:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{}};
 const featureField=id=>fields[id], current='part';
 function featureExportState(){} function featureVerifiedResult(){return null;}
@@ -412,14 +426,11 @@ let featureInspection={name:'part',token:'same-build',result:{identity:{token:'o
 featureEditorState({token:'same-build',target:{feature_evidence:[{id:'rim',status:'stale',identity:{token:'new-scale'}}]}});
 assert.equal(featureInspection,null);assert.equal(fields.review.disabled,true);
 assert.equal(fields.plot.hidden,true);assert.match(fields.status.textContent,/expired/);
-""")
+""", bindings=['current', 'evidenceRender', 'evidenceWorkflow', 'featureDirty', 'featureExportState', 'featureField', 'featureInspection', 'featureVerifiedResult', 'selectedFeatureRegion'])
 
 
 def test_editing_feature_scale_immediately_replaces_the_current_review_label():
-    start = "document.getElementById('regioneditor').addEventListener('input'"
-    handler = start + VIEWER.split(start, 1)[1].split("featureField('inspect').onclick", 1)[0]
-    js([("function featureEditorState(", "function featureInspect("),
-        ("function featureExportState(", "function featureExport(")], """
+    js(['featureEditorState', 'featureExportState', 'featureEditorInput'], """
 const current='part',entry={token:'build',target:{feature_evidence:[{id:'rim',status:'current'}]}},parts=new Map([[current,entry]]);
 const fields={freshness:{},inspect:{},verified:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{},json:{},svg:{}};
 const featureField=id=>fields[id],selectedFeatureRegion=()=>({feature:{id:'rim',feature_size_mm:.3}});
@@ -429,15 +440,14 @@ let featureDirty=false,featureInspection={name:'part',token:'build',result:{id:'
 const document={getElementById:()=>({addEventListener:(event,callback)=>{listener=callback;}})};
 let symmetryRefreshes=0;function symmetryPanel(){symmetryRefreshes++;}
 featureEditorState(entry);assert.match(fields.freshness.textContent,/matches/);
-""" + handler + """
-listener({target:{id:'featuresize'}});
+featureEditorInput({target:{id:'featuresize'}});
 assert.match(fields.freshness.textContent,/Unsaved feature edits/);assert.equal(symmetryRefreshes,1);
 assert.equal(featureInspection,null);assert.equal(fields.json.disabled,true);assert.equal(fields.svg.disabled,true);
-""")
+""", bindings=['current', 'evidenceRender', 'evidenceWorkflow', 'featureDirty', 'featureEditorState', 'featureExportState', 'featureField', 'featureInspection', 'featureVerifiedResult', 'parts', 'selectedFeatureRegion', 'symmetryPanel'])
 
 
 def test_symmetry_categories_keep_unknowns_counts_thresholds_and_stale_feature_records():
-    js([("function symmetryFeatureSignature(", "function symmetryPanel(")], """
+    js(['symmetryFeatureSignature', 'symmetryCategoryRows', 'symmetryFresh'], """
 const current='part',comparePreview=new Map(),comparePending=new Map();let featureDirty=false;
 const options={axis:'x'},symmetryOptions=()=>options;
 const category={count:2,unmatched_count:1,tolerance_mm:.01,status:'deviations',sides:{negative:{count:1},positive:{count:1,max_mm:.4}}};
@@ -451,11 +461,11 @@ featureDirty=true;assert.equal(symmetryFresh(entry,report),false);featureDirty=f
 report.feature_records=JSON.parse(JSON.stringify(report.feature_records));
 entry.target.regions[0].feature.center_mm[0]=4;
 assert.equal(symmetryFresh(entry,report),false);
-""")
+""", bindings=['comparePending', 'comparePreview', 'current', 'featureDirty', 'symmetryOptions'])
 
 
 def test_explicit_center_editor_roundtrip_and_clear_do_not_restore_a_hidden_alias():
-    js([("function featureSectionValue(", "function featureEditorState(")], """
+    js(['featureSectionValue', 'featureSectionStore', 'featureSectionLoad', 'featureRegionValues', 'featureEditorLoad', 'featureVerifiedResult'], """
 const previous={id:'center',point_mm:[-3,0,0],symmetry_group:'cushion holes'};
 const selectedFeatureRegion=()=>({feature:previous}),current='part',parts=new Map();
 const Option=(text,value)=>({text,value}),fields=new Map(),featureField=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,setAttribute(){},replaceChildren(){}});return fields.get(id);};
@@ -469,4 +479,4 @@ let saved=featureRegionValues({name:'left hole'}).feature;
 assert.deepEqual(saved.center_mm,[-3,0,0]);assert.equal(saved.symmetry_group,'cushion holes');assert.equal('point_mm' in saved,false);
 featureField('center').value='';saved=featureRegionValues({name:'left hole'}).feature;
 assert.equal('center_mm' in saved,false);assert.equal('point_mm' in saved,false);
-""")
+""", bindings=['Option', 'crypto', 'current', 'document', 'evidenceWorkflow', 'featureDirty', 'featureEditorState', 'featureField', 'featureInspection', 'featureSectionLoad', 'featureSectionStore', 'featureSectionValue', 'featureSeries', 'inspectionField', 'inspectionVector', 'parts', 'selectedFeatureRegion'])

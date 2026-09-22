@@ -11,9 +11,11 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VIEWER = (ROOT / "src/nurb/viewer.html").read_text(encoding="utf-8")
 THREE = (ROOT / "src/nurb/vendor/three/build/three.module.min.js").as_uri()
+INSPECTION_VIEWER = (ROOT / "src/nurb/inspection-viewer.js").as_uri()
 
 
 def run_js(source):
+    source=f"import * as InspectionViewer from {json.dumps(INSPECTION_VIEWER)};\n"+source
     node = shutil.which("node")
     if not node:
         pytest.skip("viewer JavaScript checks need Node.js")
@@ -23,12 +25,13 @@ def run_js(source):
     assert result.returncode == 0, result.stderr
 
 
-def function(start, end):
-    return start + VIEWER.split(start, 1)[1].split(end, 1)[0]
+def functions(names, bindings=()):
+    accessors="\n".join(f"get {name}() {{ return {name}; }}, set {name}(value) {{ {name}=value; }}," for name in bindings)
+    return "const {"+",".join(names)+"} = {...InspectionViewer,...InspectionViewer.createInspectionController({"+accessors+"})};\n"
 
 
 def test_unsigned_metrics_keep_raw_deviation_and_do_not_invent_legacy_coverage():
-    rows = function("function comparisonRows(", "function compareClear(")
+    rows = functions(['comparisonRows'])
     run_js(
         "import assert from 'node:assert/strict';\n"
         + rows
@@ -44,8 +47,8 @@ assert.equal(comparisonRows(null)[0][1], 'n/a');
 
 
 def test_heatmap_ignores_tolerated_samples_and_clears_for_stale_geometry():
-    clear = function("function compareClear(", "function compareInvalidate(")
-    samples = function("function compareSamples(", "function comparePanel(")
+    clear = functions(['compareClear'], bindings=['compareMarks', 'comparePainted'])
+    samples = functions(['compareSamples', 'comparisonToleranceMatches', 'comparisonCenteredTransform', 'comparisonMatrix', 'comparisonTransform', 'comparisonRigid', 'comparisonRigidTransform', 'comparisonPreview', 'compareAlignment', 'comparisonWorst', 'comparisonAbove', 'comparisonFocus', 'comparisonTransformFields'], bindings=['WebSocket', 'camera', 'compareAuto', 'compareClear', 'compareInvalidate', 'compareMap', 'compareMarks', 'comparePainted', 'comparePanel', 'comparePending', 'comparePreview', 'compareScale', 'compareThrough', 'comparisonPreview', 'controls', 'current', 'datumPreview', 'document', 'mesh', 'modelNodes', 'parts', 'plane', 'renderer', 'sock'])
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
         "import assert from 'node:assert/strict';\n"
@@ -77,8 +80,8 @@ assert.equal(compareMarks.children.length, 0);
 
 
 def test_reference_transform_is_row_major_and_old_offsets_still_work():
-    helpers = function("function referenceUsesSourceMaterial(", "async function ghostAttach(")
-    attach = function("async function ghostAttach(", "// ---- comparison panel ----")
+    helpers = functions(['referenceUsesSourceMaterial', 'referenceMaterialList', 'referenceMaterialShape', 'referenceMeshes', 'referenceResources', 'referenceDispose', 'referenceSanitizeScene', 'referenceCloneScene', 'referenceInstance', 'referenceSetMode', 'modelGeometryDispose', 'displayedMeshDispose'], bindings=['ghostMaterial', 'plane'])
+    attach = functions(['ghostAttach'], bindings=['comparePanel', 'comparePreview', 'current', 'ghostGeo', 'ghostWanted', 'inspectionMode', 'loader', 'mesh', 'parts', 'referenceInstance', 'renderer'])
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
         "import assert from 'node:assert/strict';\n"
@@ -107,7 +110,7 @@ assert.equal(await ghostAttach(current, entry), undefined);
 
 
 def test_reference_and_side_by_side_use_source_texture_while_analysis_modes_use_amber():
-    helpers = function("function referenceUsesSourceMaterial(", "async function ghostAttach(")
+    helpers = functions(['referenceUsesSourceMaterial', 'referenceMaterialList', 'referenceMaterialShape', 'referenceMeshes', 'referenceResources', 'referenceDispose', 'referenceSanitizeScene', 'referenceCloneScene', 'referenceInstance', 'referenceSetMode', 'modelGeometryDispose', 'displayedMeshDispose'], bindings=['ghostMaterial', 'plane'])
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
         "import assert from 'node:assert/strict';\n"
@@ -144,7 +147,7 @@ assert.equal(reference.children[0].scale.x, 10);
 
 
 def test_reference_scene_strips_non_mesh_content_and_remaps_skinned_bones():
-    helpers = function("function referenceUsesSourceMaterial(", "async function ghostAttach(")
+    helpers = functions(['referenceUsesSourceMaterial', 'referenceMaterialList', 'referenceMaterialShape', 'referenceMeshes', 'referenceResources', 'referenceDispose', 'referenceSanitizeScene', 'referenceCloneScene', 'referenceInstance', 'referenceSetMode', 'modelGeometryDispose', 'displayedMeshDispose'], bindings=['ghostMaterial', 'plane'])
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
         "import assert from 'node:assert/strict';\n"
@@ -179,7 +182,7 @@ assert.equal(clonedSkin.skeleton.bones[0].name, 'kept-bone');
 
 
 def test_reference_section_assembles_open_primitive_chains_into_one_closed_contour():
-    contours = function("function sectionSegments(", "// Separable squared Euclidean distance transform.")
+    contours = functions(['sectionSegments', 'sectionAssemble', 'sectionContours', 'sectionContoursMany'])
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
         "import assert from 'node:assert/strict';\n"
@@ -208,10 +211,7 @@ assert.equal(combined.segments.length, 8);
 
 
 def test_tolerance_input_rejects_zero_and_values_below_the_backend_minimum():
-    change = function(
-        "document.getElementById('comparetolerance').onchange =",
-        "\n\nconst compareFile =",
-    )
+    change = functions(['comparisonToleranceChanged'], bindings=['WebSocket', 'compareInvalidate', 'comparePending', 'current', 'inspectionToleranceOverride', 'sock'])
 
     run_js(
         "import assert from 'node:assert/strict';\n"
@@ -227,18 +227,18 @@ let error = '', reports = 0;
 const target = {value: '', setCustomValidity: value => error = value,
   reportValidity: () => reports++};
 for (const value of ['0', '0.0009', '-1', '', 'NaN']) {
-  target.value = value; input.onchange({target});
+  target.value = value; comparisonToleranceChanged({target});
   assert.match(error, /at least 0.001 mm/);
 }
 assert.equal(reports, 5); assert.equal(sent.length, 0); assert.equal(invalidated, 0);
-target.value = '0.001'; input.onchange({target});
+target.value = '0.001'; comparisonToleranceChanged({target});
 assert.equal(error, ''); assert.equal(invalidated, 1);
 assert.deepEqual(sent, [{type: 'target_settings', name: 'disk', tolerance_mm: .001}]);
 """
     )
 
 def test_pending_tolerance_accepts_decimal_serialization_without_accepting_other_settings():
-    matching = function("function comparisonToleranceMatches(", "function comparePanel(")
+    matching = functions(['comparisonToleranceMatches', 'comparisonCenteredTransform', 'comparisonMatrix', 'comparisonTransform', 'comparisonRigid', 'comparisonRigidTransform', 'comparisonPreview', 'compareAlignment', 'comparisonWorst', 'comparisonAbove', 'comparisonFocus', 'comparisonTransformFields'], bindings=['WebSocket', 'camera', 'compareClear', 'compareInvalidate', 'compareMap', 'comparePanel', 'comparePending', 'comparePreview', 'comparisonPreview', 'controls', 'current', 'datumPreview', 'document', 'mesh', 'modelNodes', 'parts', 'sock'])
     run_js(
         "import assert from 'node:assert/strict';\n"
         + matching
@@ -253,7 +253,7 @@ assert.equal(comparisonToleranceMatches(.3, NaN), false);
 
 
 def test_alignment_controls_preview_before_persisting_rigid_transforms():
-    align = function("function comparisonCenteredTransform(", "function comparePanel(")
+    align = functions(['comparisonCenteredTransform', 'comparisonMatrix', 'comparisonTransform', 'comparisonRigid', 'comparisonRigidTransform', 'comparisonPreview', 'compareAlignment', 'comparisonWorst', 'comparisonAbove', 'comparisonFocus', 'comparisonTransformFields'], bindings=['WebSocket', 'camera', 'compareClear', 'compareInvalidate', 'compareMap', 'comparePanel', 'comparePending', 'comparePreview', 'comparisonPreview', 'controls', 'current', 'datumPreview', 'document', 'mesh', 'modelNodes', 'parts', 'sock'])
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
         "import assert from 'node:assert/strict';\n"
@@ -268,7 +268,7 @@ def test_alignment_controls_preview_before_persisting_rigid_transforms():
         "reference.matrixAutoUpdate = false; reference.matrix.set(...transform); mesh.add(cad, reference);\n"
         "function compareInvalidate(reason) { comparePending.set(current, {reason, token: entry.token}); }\n"
         "function compareClear() {} function comparePanel() {}\n"
-        + function("function componentInfo(", "function inspectionSave(")
+        + functions(['componentInfo', 'modelNodes'], bindings=['mesh'])
         + align
         + """
 compareAlignment('lock');
@@ -296,8 +296,8 @@ assert.equal(comparisonCenteredTransform(transform, [NaN,0,0], [0,0,0]), null);
 
 
 def test_comparison_helpers_report_detected_regions_and_preserve_rigid_transform():
-    helpers = function("function comparisonWorst(", "function comparePanel(")
-    matrix = function("function comparisonMatrix(", "function compareAlignment(")
+    helpers = functions(['comparisonWorst', 'comparisonAbove', 'comparisonFocus', 'comparisonTransformFields'], bindings=['camera', 'compareMap', 'comparePanel', 'controls', 'current', 'document', 'mesh', 'parts'])
+    matrix = functions(['comparisonMatrix', 'comparisonTransform', 'comparisonRigid', 'comparisonRigidTransform', 'comparisonPreview'], bindings=['compareClear', 'comparePanel', 'comparePending', 'comparePreview', 'current', 'mesh', 'parts'])
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
         "import assert from 'node:assert/strict';\n"
@@ -327,18 +327,16 @@ def test_compare_is_discoverable_without_a_reference_and_labels_coverage_as_esti
     assert ".3mf" not in VIEWER.split('id="compareref"', 1)[1].split(">", 1)[0]
 
 
-def test_narrow_embed_uses_a_full_width_bottom_sheet_and_failed_apply_keeps_preview():
+def test_narrow_embed_uses_a_full_width_bottom_sheet():
     assert "@media (max-width: 820px)" in VIEWER
     assert "@media (max-width: 600px)" not in VIEWER
     assert "body.embed.comparing #comparepanel { position: fixed; inset: auto 0 0 0;" in VIEWER
     assert "const dirty = waiting && !waiting.error" in VIEWER
-    apply = function("function compareAlignment(", "function comparisonWorst(")
-    assert "comparePreview.delete(current);\n  compareInvalidate('Saving alignment" not in apply
 
 
 def test_changed_reference_disposes_only_the_retired_cached_geometry():
-    helpers = function("function referenceUsesSourceMaterial(", "async function ghostAttach(")
-    attach = function("async function ghostAttach(", "// ---- comparison panel ----")
+    helpers = functions(['referenceUsesSourceMaterial', 'referenceMaterialList', 'referenceMaterialShape', 'referenceMeshes', 'referenceResources', 'referenceDispose', 'referenceSanitizeScene', 'referenceCloneScene', 'referenceInstance', 'referenceSetMode', 'modelGeometryDispose', 'displayedMeshDispose'], bindings=['ghostMaterial', 'plane'])
+    attach = functions(['ghostAttach'], bindings=['comparePanel', 'comparePreview', 'current', 'ghostGeo', 'ghostWanted', 'inspectionMode', 'loader', 'mesh', 'parts', 'referenceInstance', 'renderer'])
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
         "import assert from 'node:assert/strict';\n"
@@ -378,8 +376,8 @@ assert.equal(newImageClosed, 0);
 
 
 def test_lost_reference_load_race_disposes_texture_and_closes_decoded_image():
-    helpers = function("function referenceUsesSourceMaterial(", "async function ghostAttach(")
-    attach = function("async function ghostAttach(", "// ---- comparison panel ----")
+    helpers = functions(['referenceUsesSourceMaterial', 'referenceMaterialList', 'referenceMaterialShape', 'referenceMeshes', 'referenceResources', 'referenceDispose', 'referenceSanitizeScene', 'referenceCloneScene', 'referenceInstance', 'referenceSetMode', 'modelGeometryDispose', 'displayedMeshDispose'], bindings=['ghostMaterial', 'plane'])
+    attach = functions(['ghostAttach'], bindings=['comparePanel', 'comparePreview', 'current', 'ghostGeo', 'ghostWanted', 'inspectionMode', 'loader', 'mesh', 'parts', 'referenceInstance', 'renderer'])
     run_js(
         f"import * as THREE from {json.dumps(THREE)};\n"
         "import assert from 'node:assert/strict';\n"
@@ -405,12 +403,26 @@ assert.equal(ghostGeo.size, 0);
 
 
 def test_reference_mode_hides_cad_finding_highlights():
-    sync = function("function syncPins()", "const material =")
+    sync = functions(['syncPins'], bindings=['inspectionMode', 'pins', 'pinsPlaced', 'pinsWanted'])
     run_js("import assert from 'node:assert/strict'; let inspectionMode='reference'; const pins={}; let pinsWanted=true,pinsPlaced=true;\n" + sync + "\nsyncPins();assert.equal(pins.visible,false);inspectionMode='overlay';syncPins();assert.equal(pins.visible,true);")
 
 
+def test_reference_load_discards_geometry_when_the_displayed_mesh_group_changes():
+    run_js(f"import * as THREE from {json.dumps(THREE)};\n"+"import assert from 'node:assert/strict';\n"+"""
+const original=new THREE.Group(),parts=new Map(),ghostGeo=new Map();let mesh=original,disposed=0;
+const geometry=new THREE.BoxGeometry();geometry.dispose=()=>disposed++;
+const entry={target:{stamp:'unchanged'}};parts.set('part',entry);
+const runtime={renderer:true,get mesh(){return mesh;},ghostGeo,parts,
+ loader:{loadAsync:async()=>{mesh=new THREE.Group();return {scene:new THREE.Mesh(geometry)};}}};
+const controller=InspectionViewer.createInspectionController(runtime);
+assert.equal(await controller.ghostAttach('part',entry),undefined);
+assert.equal(original.children.length,0);assert.equal(mesh.children.length,0);
+assert.equal(disposed,1);assert.equal(ghostGeo.size,0);
+""")
+
+
 def test_import_component_preview_hides_only_the_unchecked_source_groups():
-    visibility = function("function importVisibility()", "async function importLanded(")
+    visibility = functions(['importVisibility'], bindings=['document', 'importPreview'])
     run_js(f"import * as THREE from {json.dumps(THREE)};\n" + "import assert from 'node:assert/strict';\n" + """
 const root=new THREE.Group(), first=new THREE.Mesh(), second=new THREE.Mesh();
 first.name='component-1';second.name='component-2';root.add(first,second);
@@ -426,8 +438,8 @@ assert.equal(apply.disabled,false);assert.match(status.textContent,/saved refere
 @pytest.mark.parametrize("alignment_first", [False, True])
 @pytest.mark.parametrize("cancel_alignment", [False, True])
 def test_component_preview_cancel_preserves_visible_alignment_before_apply(alignment_first, cancel_alignment):
-    alignment = function("function comparisonCenteredTransform(", "function comparisonWorst(")
-    components = function("function importCancel()", "document.getElementById('importpreview').onclick")
+    alignment = functions(['comparisonCenteredTransform', 'comparisonMatrix', 'comparisonTransform', 'comparisonRigid', 'comparisonRigidTransform', 'comparisonPreview', 'compareAlignment'], bindings=['WebSocket', 'compareClear', 'compareInvalidate', 'comparePanel', 'comparePending', 'comparePreview', 'comparisonPreview', 'current', 'datumPreview', 'document', 'mesh', 'modelNodes', 'parts', 'sock'])
+    components = functions(['importCancel', 'importVisibility', 'importLanded'], bindings=['atob', 'current', 'document', 'importCancel', 'importPreview', 'importVisibility', 'inspectionSetMode', 'loader', 'mesh', 'parts', 'referenceInstance'])
     run_js(f"import * as THREE from {json.dumps(THREE)};\n" + "import assert from 'node:assert/strict';\n" + """
 const current = 'fixture', sent = [], comparePending = new Map(), comparePreview = new Map();
 const WebSocket = {OPEN:1}, sock = {readyState:1,send:text=>sent.push(JSON.parse(text))};
@@ -437,7 +449,7 @@ const entry = {token:'built',target:{stamp:'source',transform:saved,import:{excl
 const parts = new Map([[current,entry]]), mesh = new THREE.Group(); mesh.userData.token='built';
 const original = new THREE.Group(); original.name='target'; original.matrixAutoUpdate=false;
 original.matrix.set(...saved); mesh.add(original);
-let importPreview = null;
+let importPreview = null, datumPreview = null;
 const elements = new Map();
 const document = {
   getElementById(id) { if (!elements.has(id)) elements.set(id,{replaceChildren(){},append(){},textContent:''}); return elements.get(id); },

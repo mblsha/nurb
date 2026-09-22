@@ -55,6 +55,7 @@ source-include = [
     "src/nurb/viewer.html",
     "src/nurb/spacemouse.js",
     "src/nurb/inspection-state.js",
+    "src/nurb/inspection-viewer.js",
     "src/nurb/doctrine.md",
     "src/nurb/agents.md",
     "src/nurb/skill.md",
