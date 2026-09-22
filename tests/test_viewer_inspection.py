@@ -70,6 +70,21 @@ runtime.inspectionBusy=true;controller.evidenceRender();assert.equal(fields.save
 """)
 
 
+def test_no_reference_reinitializes_and_renders_the_coordinator_disabled():
+    js([], """
+const fields={evidenceguidance:{},verifyrun:{disabled:false},verifycancel:{},inspectionworkflow:{dataset:{}},inspect:{disabled:false},save:{},capture:{}};
+const runtime={document:{getElementById:id=>fields[id]},featureField:id=>fields[id],inspectionField:id=>fields[id],inspectionBusy:false,
+ evidenceWorkflow:inspectionInitial({part:'old',token:'old',interfaceId:'rim',referenceReady:true,freshness:'current'})};
+const controller=InspectionViewer.createInspectionController(runtime);
+controller.evidenceUnavailable({name:'fresh',token:'build'});
+assert.equal(runtime.evidenceWorkflow.part,'fresh');
+assert.equal(runtime.evidenceWorkflow.referenceReady,false);
+assert.equal(fields.inspect.disabled,true);
+assert.equal(fields.verifyrun.disabled,true);
+assert.match(fields.evidenceguidance.textContent,/Attach a reference/);
+""")
+
+
 def test_section_refuses_open_meshes_and_coplanar_boundaries_instead_of_filling_them():
     js(['sectionSegments', 'sectionAssemble', 'sectionContours', 'sectionContoursMany', 'sectionMaskDistance', 'sectionMaskClassify', 'sectionScaleLabelY'], """
 const geometry = new THREE.BufferGeometry();
@@ -283,6 +298,21 @@ assert.equal(fields.review.disabled,true);
 assert.match(fields.freshness.textContent,/stale/);
 assert.match(fields.status.textContent,/expired/);
 """, bindings=['current', 'evidenceRender', 'evidenceWorkflow', 'featureDirty', 'featureExportState', 'featureField', 'featureInspection', 'featureVerifiedResult', 'selectedFeatureRegion'])
+
+
+def test_specialized_feature_validator_status_distinguishes_current_failure_and_stale_evidence():
+    js(['featureValidationSummary'], """
+const record={validation_reports:[
+  {label:'Neewer reconstruction',status:'accepted',freshness:'current',findings:[],changed:[]},
+  {label:'Light Seal interfaces',status:'failed',freshness:'current',findings:[{message:'independent scan evidence needs review'}],changed:[]},
+  {label:'Previous exact check',status:'stale',freshness:'stale',findings:[],changed:['parts/model.py']},
+]};
+const text=featureValidationSummary(record);
+assert.match(text,/Neewer reconstruction: current and accepted/);
+assert.match(text,/Light Seal interfaces: current and failed: independent scan evidence needs review/);
+assert.match(text,/Previous exact check: stale or unavailable[.] Changed: parts[/]model[.]py/);
+assert.equal(featureValidationSummary({}), '');
+""")
 
 
 def test_feature_rename_preserves_identity_and_other_saved_series():

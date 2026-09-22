@@ -83,6 +83,10 @@ def setting(settings):
     }
     if "regions" in raw:
         result["regions"] = inspection_regions(raw["regions"])
+    if "validation_reports" in raw:
+        from . import validator_evidence
+
+        result["validation_reports"] = validator_evidence.report_specs(raw["validation_reports"])
     return result
 
 
@@ -501,7 +505,7 @@ def update_card(part_path, **changes):
     current = setting(checks.settings(path))
     if current is None:
         raise ValueError(f"{path.stem} has no target in its card")
-    allowed = {"units", "tolerance_mm", "transform", "regions", "file"}
+    allowed = {"units", "tolerance_mm", "transform", "regions", "validation_reports", "file"}
     if "file" in changes:
         file = str(changes["file"])
         if pathlib.PurePosixPath(file).is_absolute() or pathlib.PureWindowsPath(file).drive or ".." in pathlib.PurePosixPath(file).parts or "\\" in file:
@@ -518,7 +522,7 @@ def update_card(part_path, **changes):
     block, after = rest.split("```", 1)
     block = _replace_target(block, normalized, require=True)
     card.write_text(before + opening + block + "```" + after, encoding="utf-8")
-    return [name for name in ("file", "units", "tolerance_mm", "transform", "regions") if name in changes]
+    return [name for name in ("file", "units", "tolerance_mm", "transform", "regions", "validation_reports") if name in changes]
 
 
 def attach_reference(part_path, relative_file, units=None, tolerance_mm=DEFAULT_TOLERANCE_MM):
@@ -664,6 +668,8 @@ def _format_setting(target):
         fields.append(f"transform = [{matrix}]")
     if "regions" in target:
         fields.append("regions = " + _toml_value(target["regions"]))
+    if "validation_reports" in target:
+        fields.append("validation_reports = " + _toml_value(target["validation_reports"]))
     return "target = { " + ", ".join(fields) + " }"
 
 
@@ -677,6 +683,8 @@ def _format_table(target):
         fields.append(f"transform = [{matrix}]")
     if "regions" in target:
         fields.append("regions = " + _toml_value(target["regions"]))
+    if "validation_reports" in target:
+        fields.append("validation_reports = " + _toml_value(target["validation_reports"]))
     return "\n".join(fields) + "\n"
 
 

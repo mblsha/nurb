@@ -1,5 +1,5 @@
 import * as THREE from './vendor/three/build/three.module.min.js';
-import { inspectionActions, inspectionGuidance, inspectionHydrateVerification, inspectionTransition, sectionSeriesInitial, sectionSeriesSelect, sectionSeriesSelected, sectionSeriesUpdate } from './inspection-state.js';
+import { inspectionActions, inspectionGuidance, inspectionHydrateVerification, inspectionInitial, inspectionTransition, sectionSeriesInitial, sectionSeriesSelect, sectionSeriesSelected, sectionSeriesUpdate } from './inspection-state.js';
 
 export function referenceUsesSourceMaterial(mode) {
   return mode === 'reference' || mode === 'side-by-side';
@@ -345,6 +345,20 @@ export function symmetryCategoryRows(report) {
         fixed(category?.sides?.positive?.max_mm),fixed(category?.tolerance_mm),(category?.status || 'not_assessed').replaceAll('_',' '),fixed(category?.sides?.on_plane?.max_mm)])];
 }
 
+export function featureValidationSummary(record) {
+  return (record?.validation_reports || []).map(report => {
+    const prefix = `${report.label}: `;
+    if (report.status === 'accepted' && report.freshness === 'current') return prefix + 'current and accepted by its specialized validator.';
+    if (report.status === 'failed' && report.freshness === 'current') {
+      const finding = report.findings?.[0]?.message;
+      return prefix + `current and failed${finding ? `: ${finding}` : '.'}`;
+    }
+    const changed = report.changed?.length ? ` Changed: ${report.changed.slice(0, 3).join(', ')}.` : '';
+    const error = report.error ? ` ${report.error}` : '';
+    return prefix + `stale or unavailable.${changed}${error}`;
+  }).join(' ');
+}
+
 // The viewer owns geometry and evidence. Live accessors keep this controller on the
 // same state across rebuilds, selection changes, captures, and embedded views.
 export function createInspectionController(viewer) {
@@ -610,6 +624,12 @@ export function createInspectionController(viewer) {
     viewer.document.getElementById('inspectionworkflow').dataset.phase=viewer.evidenceWorkflow.capture.status==='capturing'?'capture':viewer.evidenceWorkflow.verification.status;
   }
 
+  function evidenceUnavailable(entry) {
+    viewer.evidenceWorkflow=inspectionInitial({part:entry?.name ?? null,token:entry?.token ?? null,freshness:'current'});
+    viewer.evidenceWorkflow=inspectionHydrateVerification(viewer.evidenceWorkflow,entry);
+    evidenceRender();
+  }
+
   function featureSectionValue() {
     const offsets = viewer.featureField('offsets').value.trim().split(/[\s,]+/).filter(Boolean).map(Number);
     return {name:viewer.featureField('sectionname').value.trim(),origin_mm:viewer.inspectionVector(viewer.featureField('origin').value,'Local origin'),
@@ -684,11 +704,12 @@ export function createInspectionController(viewer) {
 
   function featureEditorState(entry) {
     const selected = viewer.selectedFeatureRegion(), record = entry?.target?.feature_evidence?.find(item => item.id === selected?.feature?.id);
-    viewer.featureField('freshness').textContent = viewer.featureDirty ? 'Unsaved feature edits: save the region before inspecting.' : !selected?.feature ? 'Save a feature to keep its identity and evidence.'
+    const inspection = viewer.featureDirty ? 'Unsaved feature edits: save the region before inspecting.' : !selected?.feature ? 'Save a feature to keep its identity and evidence.'
       : entry?.target?.stale ? 'Evidence stale: model or reference settings changed.'
       : record?.status === 'current' ? 'Recorded inspection matches the current geometry, reference, alignment and feature contract. This is evidence, not a fit certificate.'
       : record?.status === 'stale' ? 'Evidence stale: geometry, reference, alignment or feature contract changed. Inspect again.'
       : 'No inspection recorded for this feature.';
+    viewer.featureField('freshness').textContent = [inspection, featureValidationSummary(record)].filter(Boolean).join(' ');
     if (viewer.evidenceWorkflow.token && entry?.token && viewer.evidenceWorkflow.token!==entry.token)
       viewer.evidenceWorkflow=inspectionTransition(viewer.evidenceWorkflow,{type:'rebuild',token:entry.token,freshness:entry.target?.stale?'stale':'current'});
     viewer.evidenceWorkflow={...viewer.evidenceWorkflow,part:viewer.current,token:entry?.token,interfaceId:selected?.feature?.id || null,
@@ -1143,6 +1164,7 @@ export function createInspectionController(viewer) {
     datumLanded,
     regionSave,
     evidenceRender,
+    evidenceUnavailable,
     featureSectionValue,
     featureSectionStore,
     featureSectionLoad,

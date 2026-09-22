@@ -267,6 +267,7 @@ class Server:
         self.verifications = {}
         self.verification_controls = {}
         self.symmetry_jobs = {}
+        self.validation_paths = {}
         # A legacy target has no stored frame. Center it once per server session and
         # hold that frame while the editable part changes, so an extremity edit does
         # not move the reference and disguise the actual difference.
@@ -917,6 +918,7 @@ class Server:
         arrive with the check pass, the way findings already do."""
         from . import checks, compare
 
+        self.validation_paths.pop(entry["name"], None)
         try:
             declared = compare.setting(checks.settings(path))
         except ValueError as exc:
@@ -972,6 +974,15 @@ class Server:
             "import": hit.get("import"),
         }
         entry["target_glb"] = hit["glb"]
+        reports = declared.get("validation_reports", [])
+        if reports:
+            from . import validator_evidence
+
+            validation, watched = validator_evidence.load_reports(self.root, reports)
+            entry["target"]["validation_reports"] = validation
+            self.validation_paths[entry["name"]] = watched
+        else:
+            self.validation_paths.pop(entry["name"], None)
         if shape is not None and any("feature" in r for r in declared.get("regions", [])):
             from . import feature_evidence
             entry["evidence_geometry"] = feature_evidence.shape_identity(shape)
@@ -980,6 +991,8 @@ class Server:
                                                 entry.get("variant"), region)
                 for region in declared.get("regions", []) if "feature" in region
             ]
+            for record in entry["target"]["feature_evidence"]:
+                record["validation_reports"] = [report for report in validation if record["id"] in report["feature_ids"]] if reports else []
 
     def _target_stamp(self, file, units):
         path = pathlib.Path(file)
@@ -2232,6 +2245,11 @@ class Server:
 
     # ---------- watching ----------
 
+    def _validation_dependents(self, paths):
+        parts = self.root / "parts"
+        return [parts / f"{name}.py" for name, watched in self.validation_paths.items()
+                if watched & set(paths) and (parts / f"{name}.py").is_file()]
+
     def watch(self):
         from . import checks
 
@@ -2252,7 +2270,7 @@ class Server:
                 if getattr(event, "event_type", "modified") in ("modified", "created", "deleted", "moved", "closed"):
                     from .symmetry_service import changed
                     changed(server, paths)
-                affected = []
+                affected = server._validation_dependents(paths)
                 # The watchdog callback runs on its own thread while drain replaces
                 # completed entries on the event loop. Snapshot before resolving files
                 # so a rebuild cannot resize the dictionary mid-iteration.

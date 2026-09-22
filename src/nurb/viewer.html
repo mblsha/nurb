@@ -941,6 +941,7 @@ const {
   datumLanded,
   regionSave,
   evidenceRender,
+  evidenceUnavailable,
   featureSectionValue,
   featureSectionStore,
   featureSectionLoad,
@@ -1792,6 +1793,7 @@ function comparePanel(entry) {
     emptyState.textContent = waiting?.error || waiting?.reason || '';
     emptyState.className = waiting?.error ? 'bad' : '';
     compareClear();
+    evidenceUnavailable(entry);
     return;
   }
   document.getElementById('comparefile').textContent = (target.file || 'Reference mesh').split(/[\\/]/).pop();

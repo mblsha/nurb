@@ -176,3 +176,31 @@ def test_textured_component_inspection_round_trips_through_the_real_viewer(tmp_p
     assert saved["view"]["hidden_components"] == ["Lid_1"]
     assert saved["view"]["mode"] == "overlay"
     assert saved["view"]["alignment"] == target["transform"]
+
+
+def test_fresh_model_without_reference_disables_evidence_actions_in_the_real_viewer(tmp_path):
+    pytest.importorskip("playwright", reason="nurb render is an optional extra")
+    from playwright.sync_api import sync_playwright
+    from nurb import render
+
+    (tmp_path / "parts").mkdir()
+    part = tmp_path / "parts" / "thing.py"
+    part.write_text(PART)
+    server = Server(tmp_path)
+    server.rebuild(part)
+    server.port = render.free_port()
+    done, thread = live_server(server)
+    try:
+        with sync_playwright() as playwright:
+            browser = render._launch(playwright)
+            page = browser.new_page(viewport={"width": 1200, "height": 900})
+            page.goto(f"http://127.0.0.1:{server.port}/?part=thing")
+            page.wait_for_function("window.__nurb?.ready")
+            page.locator("#ghostbtn").click()
+            assert page.locator("#featureinspect").is_disabled()
+            assert page.locator("#verifyrun").is_disabled()
+            assert "Attach a reference" in page.locator("#evidenceguidance").inner_text()
+            browser.close()
+    finally:
+        done.set()
+        thread.join(timeout=10)
