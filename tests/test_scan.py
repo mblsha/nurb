@@ -59,7 +59,7 @@ def test_compressed_ply_matches_uncompressed_geometry_and_units(tmp_path, encodi
     assert "it is a .ply.gz" in scan.report(target, mesh, unit, source)[-1]
 
 
-@pytest.mark.parametrize("body", [b"not gzip", gzip.compress(b"ply\n")[:-4]])
+@pytest.mark.parametrize("body", [b"not gzip", gzip.compress(b"ply\n", mtime=0)[:-4]])
 def test_invalid_compressed_ply_names_how_to_recover(tmp_path, body):
     target = tmp_path / "broken.ply.gz"
     target.write_bytes(body)
