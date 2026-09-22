@@ -311,6 +311,17 @@ assert.equal(entry.target.verification.metrics,undefined);
 """)
 
 
+def test_saved_symmetry_plane_ignores_live_panel_and_checkbox_visibility():
+    js([('function symmetryClearPlane(', 'function symmetryFeatureSignature(')], """
+const scene=new THREE.Scene(),mesh=new THREE.Mesh(new THREE.BoxGeometry(5,5,5));
+let symmetryPlane=null,compareOpen=false;
+const symmetryElement=()=>({checked:false});
+const report={plane:{normal:[1,0,0],offset_mm:0}};
+symmetryDrawPlane(report);assert.equal(symmetryPlane,null);
+symmetryDrawPlane(report,true);assert.ok(symmetryPlane);assert.ok(scene.children.includes(symmetryPlane));
+""")
+
+
 def test_precise_verification_shows_stale_without_reusing_old_metrics():
     js([("function verificationShow(", "function verificationLanded(")], """
 const current='part', verificationHistory=new Map([['part',{token:'old',status:'measured',metrics:{part:{sampled_max:0}}}]]);

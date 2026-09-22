@@ -66,12 +66,34 @@ def view_state(value):
     scale = float(value.get('deviation_scale_mm',1))
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError('deviation color scale must be positive')
+    section_source=value.get('section_source','preview')
+    if section_source not in ('preview','verified'):
+        raise ValueError('choose Preview or Verified for local section evidence')
+    policy=None
+    if section_source=='verified':
+        from dataclasses import asdict
+        from .meshing import VerificationPolicy
+        raw=value.get('verification_policy')
+        if not isinstance(raw,dict):
+            raise ValueError('verified sections need the saved verification policy; run precise verification first')
+        try: policy=asdict(VerificationPolicy(**raw))
+        except (TypeError,ValueError) as exc:
+            raise ValueError(f'the saved section verification policy is invalid: {exc}') from exc
     return {'camera':camera,'viewport':[int(v) for v in viewport],'mode':mode,'hidden_components':sorted(set(hidden)),
             'section':{'enabled':bool(cut.get('enabled')) or mode=='section','axis':axis,'position_mm':at,'fraction':fraction,'sign':-1 if cut.get('sign')==-1 else 1},
             'alignment':alignment,'tolerance_mm':tolerance,'region':region,'station':station,
             'deviation_scale_mm':scale,'deviation_map':value.get('deviation_map') if value.get('deviation_map') in ('part','target','both','off') else 'both',
             'deviation_auto':bool(value.get('deviation_auto')),'deviation_through':bool(value.get('deviation_through',True)),
-            'pins':bool(value.get('pins',False)),'symmetry_plane':bool(value.get('symmetry_plane',False))}
+            'pins':bool(value.get('pins',False)),'symmetry_plane':bool(value.get('symmetry_plane',False)),
+            'section_source':section_source,'verification_policy':policy}
+
+
+def verification_policy(provenance):
+    """The reproducible request, separate from measured output and resource usage."""
+    return {'accuracy_mm':provenance.get('absolute_deflection_mm'),
+            'timeout_s':provenance.get('timeout_s'), 'max_triangles':provenance.get('max_triangles'),
+            'feature_size_mm':provenance.get('feature_size_mm'),
+            'memory_limit_mb':(provenance.get('memory') or {}).get('limit_mb')}
 
 
 def same_view(left, right):
@@ -172,6 +194,10 @@ def save(server,path,entry,state,name):
     item['configuration']=item['identity']['configuration']
     item['region']=item['identity']['region']
     item['verification']=verification(entry,state)
+    if state['section_source']=='verified':
+        selected=verified_sections(entry,item)
+        if item['verification']['precise'].get('request_id')!=selected.get('verification_request_id'):
+            raise ValueError('verification changed while saving the setup; save it again')
     destination=setup_path(server.root,item['id'])
     temporary=destination.with_suffix('.tmp')
     temporary.write_text(json.dumps(item,indent=2,allow_nan=False)+'\n')
@@ -195,21 +221,31 @@ def verification(entry,state):
     return output
 
 
+def verified_sections(entry,item):
+    """Never substitute preview contours for an explicitly verified setup."""
+    region=item.get('region')
+    target=entry.get('target') or {}; precise=target.get('verification') or {}
+    current_region=next((value for value in target.get('regions',[]) if value.get('name')==(region or {}).get('name')),None)
+    if (not region or not region.get('feature',{}).get('sections') or target.get('stale')
+            or precise.get('status')!='measured' or precise.get('token')!=entry.get('token')
+            or current_region!=region or item['view']['alignment']!=target.get('transform')
+            or item['view']['tolerance_mm']!=target.get('tolerance_mm')
+            or item['view'].get('verification_policy')!=verification_policy(precise.get('provenance') or {})):
+        raise ValueError('Verified section evidence is unavailable for this setup and policy. Run precise verification with its saved policy in the viewer, then capture again. Preview contours were not substituted.')
+    matches=[result for result in (precise.get('metrics') or {}).get('feature_evidence',[]) if result.get('id')==region['feature']['id']]
+    current_record=next((result for result in target.get('feature_evidence',[]) if result.get('id')==region['feature']['id']),{})
+    if (len(matches)!=1 or matches[0].get('verification_request_id')!=precise.get('request_id')
+            or matches[0].get('identity')!=current_record.get('identity')):
+        raise ValueError('Verified section identity changed; inspect the current feature again')
+    return copy.deepcopy(matches[0])
+
+
 def sections(server,entry,item):
+    if item['view'].get('section_source','preview')=='verified':
+        return verified_sections(entry,item)
     region=item.get('region')
     if not region or not region.get('feature',{}).get('sections'):
         return None
-    target=entry.get('target') or {}; precise=target.get('verification') or {}
-    current_region=next((value for value in target.get('regions',[]) if value.get('name')==region.get('name')),None)
-    if (precise.get('status')=='measured' and precise.get('token')==entry.get('token')
-            and current_region==region and item['view']['alignment']==target.get('transform')
-            and item['view']['tolerance_mm']==target.get('tolerance_mm')):
-        matches=[result for result in (precise.get('metrics') or {}).get('feature_evidence',[]) if result.get('id')==region['feature']['id']]
-        if len(matches)==1:
-            result=copy.deepcopy(matches[0])
-            return {'id':result['id'],'cad':result.get('cad',[]),'reference':result.get('reference',[]),
-                    'source':'verified','verification_request_id':result.get('verification_request_id'),
-                    'provenance':result.get('provenance'), 'method':result.get('method')}
     cad, components=server._comparison_meshes(entry)
     target=entry['target']; reference=server._target_mesh(target['file'],target.get('units'))['mesh'].copy()
     reference.apply_transform(compare._transform(item['view']['alignment']))
@@ -277,15 +313,22 @@ def report_text(evidence):
     for index,cut in enumerate((evidence.get('local_sections') or {}).get('cad',[])):
         if f'sections/{index+1:03d}.svg' not in evidence['images']: continue
         lines+=['', f"[Local section {index+1}, offset {cut.get('offset_mm',0):g} mm](sections/{index+1:03d}.svg)"]
+    if evidence.get('local_sections'):
+        local=evidence['local_sections']; provenance=local.get('provenance') or {}
+        lines+=['',f"Local section source: **{local.get('source','preview')}**. Verification request: `{local.get('verification_request_id','none')}`. Requested absolute deflection: {provenance.get('absolute_deflection_mm','unknown')} mm. This is not a measured geometric error bound."]
     lines+=['', 'Printability and reconstruction accuracy are separate findings. Surface sampling cannot certify physical fit.', '',
             f"Reproduce in this project: `nurb inspection {item['part']} --render {item['id']}`. If inputs changed, add `--allow-stale` to render the new inputs with the saved view; the new report will remain marked stale."]
     return '\n'.join(lines)+'\n'
 
 
-def bundle(server,entry,item,current,png,local_sections=None,section_images=None,display_metrics=None):
+def bundle(server,entry,item,current,png,local_sections=None,section_images=None,display_metrics=None,verification_snapshot=None):
+    packet=copy.deepcopy(verification_snapshot) if verification_snapshot is not None else verification(entry,item['view'])
+    if (local_sections or {}).get('source')=='verified' and (packet['precise'].get('status')!='measured'
+            or packet['precise'].get('request_id')!=local_sections.get('verification_request_id')):
+        raise ValueError('capture sections and verification packet do not match; capture again')
     evidence={'kind':'nurb_inspection_evidence','schema_version':1,'captured_at':datetime.now(timezone.utc).isoformat(),
               'setup':item,'current_identity':current,'freshness':freshness(item['identity'],current),
-              'verification':verification(entry,item['view']),'local_sections':local_sections,
+              'verification':packet,'local_sections':local_sections,
               'images':['view.png'], 'asset_frames':{'model.glb':{'units':'mm'},'reference.glb':{'scale_to_mm':(current.get('reference') or {}).get('display_scale',1),'transform_to_part_mm':item['view']['alignment']}}}
     if display_metrics is not None:
         evidence['verification']['comparison']={'status':'measured','result':display_metrics}

@@ -50,6 +50,7 @@ async def handle(server,path,message,client):
                 values=item['configuration']['parameters']
                 draft=bool(item['identity'].get('draft')); draft_changed=server.draft!=draft
                 server.draft=draft
+                await server.send({'type':'draft','draft':server.draft})
                 server.overrides[path.stem]=copy.deepcopy(values)
                 for rebuild_path in builder.find_parts(server.root) if draft_changed else [path]:
                     server.queue.put_nowait(str(rebuild_path))
@@ -72,7 +73,11 @@ async def handle(server,path,message,client):
                     tickets={key:value for key,value in tickets.items() if time.monotonic()-value['at']<120}
                     if len(tickets)>=4: raise ValueError('too many captures are pending; finish one or wait two minutes')
                     ticket=uuid.uuid4().hex
-                    tickets[ticket]={'at':time.monotonic(),'entry':entry,'setup':item,'identity':current,'sections':cuts,'metrics':metrics}
+                    packet=inspection.verification(entry,state)
+                    if state['section_source']=='verified' and (packet['precise'].get('status')!='measured'
+                            or packet['precise'].get('request_id')!=cuts.get('verification_request_id')):
+                        raise ValueError('verification changed while preparing the capture; capture again')
+                    tickets[ticket]={'at':time.monotonic(),'entry':entry,'setup':item,'identity':current,'sections':cuts,'metrics':copy.deepcopy(metrics),'verification':packet}
                     server.inspection_tickets=tickets
                     response.update(ticket=ticket,sections=cuts,display_metrics=metrics,freshness=inspection.freshness(item['identity'],current))
             elif action=='inspection_capture':
@@ -84,8 +89,12 @@ async def handle(server,path,message,client):
                 item=ticket['setup']
                 current=await asyncio.to_thread(inspection.identity,server,path,entry,item['view'])
                 if current!=ticket['identity']: raise ValueError('capture inputs changed; no evidence bundle was written')
+                if item['view'].get('section_source')=='verified':
+                    precise=inspection.verified_sections(entry,item)
+                    if precise.get('verification_request_id')!=ticket['sections'].get('verification_request_id'):
+                        raise ValueError('the verified section request changed during capture; capture again')
                 png=inspection.png_bytes(message.get('png'))
-                destination,evidence=await asyncio.to_thread(inspection.bundle,server,entry,item,current,png,ticket['sections'],message.get('section_images'),ticket['metrics'])
+                destination,evidence=await asyncio.to_thread(inspection.bundle,server,entry,item,current,png,ticket['sections'],message.get('section_images'),ticket['metrics'],ticket['verification'])
                 response.update(path=str(destination),file=destination.name,freshness=evidence['freshness'],setup_id=item['id'])
             else:
                 raise ValueError('choose save, restore, list, or capture for an inspection')

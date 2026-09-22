@@ -681,6 +681,8 @@ def _format_table(target):
 
 
 def _toml_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if isinstance(value, dict):
         return "{ " + ", ".join(f"{key} = {_toml_value(item)}" for key, item in value.items()) + " }"
     if isinstance(value, list):

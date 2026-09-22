@@ -1642,6 +1642,7 @@ class Server:
             # shows the polished part unless someone turns it off, and the whole
             # project rebuilds on a flip: a mode is not per-part.
             self.draft = bool(msg.get("on"))
+            await self.send({"type": "draft", "draft": self.draft})
             for target in builder.find_parts(self.root):
                 self.queue.put_nowait(str(target))
             return
@@ -1846,7 +1847,7 @@ class Server:
                                 "cad": feature_evidence.sections(cad, definitions),
                                 "reference": feature_evidence.sections(reference, definitions)}
 
-                    verification_id=msg.get("verification_request_id") if msg["type"]=="feature_export" else None
+                    verification_id=msg.get("verification_request_id")
                     if verification_id:
                         verified=target.get("verification") or {}
                         if verified.get("status")!="measured" or verified.get("token")!=token or verified.get("request_id")!=verification_id:
@@ -1855,6 +1856,8 @@ class Server:
                         if len(matches)!=1:
                             raise ValueError("precise verification did not produce sections for this feature")
                         result=copy.deepcopy(matches[0])
+                        if result.get("identity") != next((record.get("identity") for record in target.get("feature_evidence",[]) if record.get("id")==region["feature"]["id"]),None):
+                            raise ValueError("verified feature identity changed; verify the current feature again")
                     else:
                         result = await asyncio.to_thread(inspect_feature)
                     if (self.state.get(name) is not entry or target.get("stale") or target["transform"] != transform
@@ -1869,8 +1872,10 @@ class Server:
                         updated = []
                         for r in regions:
                             if r is region:
-                                r = {**r, "feature": {**r["feature"], "review": {"identity": result["identity"],
-                                                                            "note": msg.get("note", "")}}}
+                                review={"identity":result["identity"],"note":msg.get("note", ""),
+                                        "source":result.get("source","preview"),"provenance":copy.deepcopy(result.get("provenance",{}))}
+                                if verification_id: review["verification_request_id"]=verification_id
+                                r = {**r, "feature": {**r["feature"], "review": review}}
                             updated.append(r)
                         compare.update_card(path, regions=updated)
                         target["stale"] = True
@@ -2210,7 +2215,7 @@ class Server:
         # Printer settings are watched like part sources. Carrying the current bed on
         # the rebuild is what lets an edit resize an already-open viewer.
         await self.send(
-            {"type": kind, "bed": self._bed(), **self._printer_state(), **self._wire(entry)}
+            {"type": kind, "draft": self.draft, "bed": self._bed(), **self._printer_state(), **self._wire(entry)}
         )
 
     # ---------- watching ----------

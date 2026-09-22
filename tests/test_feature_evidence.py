@@ -276,6 +276,30 @@ def test_viewer_verification_returns_and_exports_bounded_feature_sections(tmp_pa
     assert payload["provenance"]["absolute_deflection_mm"] == .02
 
 
+def test_recording_verified_sections_preserves_request_and_provenance(tmp_path):
+    part,server,messages=project(tmp_path)
+    async def exercise():
+        await server.command(json.dumps({'type':'target_verify','name':'thing','accuracy_mm':.02,'timeout_s':30,'max_triangles':50000}))
+        await server.verifications['thing'];verified=messages[-1]
+        result=verified['metrics']['feature_evidence'][0]
+        request={'type':'feature_inspection','name':'thing','token':server.state['thing']['token'],'feature_id':result['id'],
+                 'save_review':True,'identity':result['identity'],'verification_request_id':verified['request_id'],'note':'Both shoulders reviewed'}
+        await server.command(json.dumps({**request,'verification_request_id':'expired'}))
+        assert 'expired' in messages[-1]['error']
+        await server.command(json.dumps(request))
+        return verified,messages[-1]
+    verified,response=asyncio.run(exercise())
+    assert response['result']['saved'] and response['result']['source']=='verified'
+    review=compare.setting(checks.settings(part))['regions'][0]['feature']['review']
+    assert review['source']=='verified'
+    assert review['verification_request_id']==verified['request_id']
+    assert review['provenance']['absolute_deflection_mm']==.02
+    assert review['provenance']['memory']['limit_mb']==2048
+    assert isinstance(review['provenance']['memory']['supported'],bool)
+    server.rebuild(part)
+    assert server.state['thing']['target']['feature_evidence'][0]['status']=='current'
+
+
 def test_feature_export_rejects_source_edits_before_watcher_rebuild(tmp_path):
     part, server, messages = project(tmp_path)
     request = {"type": "feature_inspection", "name": "thing", "token": server.state["thing"]["token"], "feature_id": "headset-rim"}

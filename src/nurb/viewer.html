@@ -736,6 +736,8 @@
         <label>Saved setup <select id="inspectionchoice"><option value="">Current view</option></select></label>
         <button id="inspectionrefresh">Refresh list</button> <button id="inspectionrestore" disabled>Restore setup</button>
         <label>Inspection name <input id="inspectionlabel" maxlength="120" placeholder="Headset lip, narrow rim"></label>
+        <label>Local section evidence <select id="inspectionsectionquality"><option value="preview">Preview display mesh</option><option value="verified">Verified bounded mesh</option></select></label>
+        <p>Verified setups require a matching completed verification and preserve its policy. Captures never substitute preview contours.</p>
         <button id="inspectionsave">Save current setup</button> <button id="inspectioncapture">Capture evidence bundle</button>
         <div id="inspectionstatus" role="status"></div><div id="inspectiondownload"></div>
         <p>Restoring a setup changes the displayed parameters and preview alignment. It does not rewrite the model or card. Changed inputs are labeled stale; saving a new setup records a new baseline.</p>
@@ -1966,7 +1968,8 @@ function featureEditorState(entry) {
   featureField('verified').disabled = featureDirty || !featureVerifiedResult(entry,selected?.feature?.id);
   if (featureInspection && (featureInspection.name !== current || featureInspection.token !== entry?.token || entry?.target?.stale
       || (record?.identity && record.identity.token !== featureInspection.result?.identity?.token)
-      || (featureInspection.result?.source==='verified' && featureInspection.result.verification_request_id!==entry?.target?.verification?.request_id))) {
+      || (featureInspection.result?.source==='verified' && (entry?.target?.verification?.status!=='measured'
+          || featureInspection.result.verification_request_id!==entry?.target?.verification?.request_id)))) {
     featureInspection = null; featureField('review').disabled = true; featureField('plot').setAttribute('hidden',''); featureField('station').hidden = true;
     featureField('status').textContent = 'Displayed sections expired after a rebuild, reference or feature change. Inspect again.';
   }
@@ -1982,6 +1985,7 @@ function featureInspect(save = false) {
   featureField('status').textContent = save ? 'Recording current inspection…' : 'Measuring aligned local sections…';
   sock.send(JSON.stringify({type:'feature_inspection',name:current,token:parts.get(current)?.token,
     feature_id:region.feature.id,save_review:save,identity:save ? featureInspection.result.identity : undefined,
+    verification_request_id:save && featureInspection.result.source==='verified' ? featureInspection.result.verification_request_id : undefined,
     note:featureField('reviewnote').value}));
 }
 function featureInspectionLanded(message) {
@@ -1990,6 +1994,8 @@ function featureInspectionLanded(message) {
   if (featureDirty || message.token !== parts.get(current)?.token || message.result?.id !== selectedFeatureRegion()?.feature?.id) return;
   featureInspection = message;
   const result = message.result, select = featureField('station');
+  inspectionField('sectionquality').value=result.source==='verified'?'verified':'preview';
+  inspectionVerificationPolicy=result.source==='verified'?inspectionPolicy(result.provenance):null;
   select.replaceChildren(...result.cad.map((cut,index) => new Option(`${cut.name}: ${cut.offset_mm} mm`,String(index))));
   select.hidden = !result.cad.length; featureField('plot').toggleAttribute('hidden',!result.cad.length);
   featureField('status').textContent = result.saved ? 'Inspection recorded; it does not assert physical fit.' : result.cad.length
@@ -2008,7 +2014,7 @@ function featureExportState() {
     && !entry?.target?.stale && featureInspection?.result?.id
     && featureInspection?.result?.identity?.token && featureInspection?.result?.cad?.length;
   const currentVerification=featureInspection?.result?.source!=='verified'
-    || featureInspection.result.verification_request_id===entry?.target?.verification?.request_id;
+    || entry?.target?.verification?.status==='measured' && featureInspection.result.verification_request_id===entry?.target?.verification?.request_id;
   featureField('json').disabled = !ready || !currentVerification;
   featureField('svg').disabled = !ready || !currentVerification;
 }
@@ -4980,7 +4986,7 @@ function symmetryClearPlane() {
 }
 function symmetryDrawPlane(report, force = false) {
   symmetryClearPlane();
-  if (!mesh || !report?.plane || !symmetryElement('symmetryshow').checked || (!compareOpen && !force)) return;
+  if (!mesh || !report?.plane || (!force && (!symmetryElement('symmetryshow').checked || !compareOpen))) return;
   const bounds = new THREE.Box3().setFromObject(mesh), size = bounds.getSize(new THREE.Vector3()).length();
   const normal = new THREE.Vector3(...report.plane.normal);
   const center = bounds.getCenter(new THREE.Vector3()).sub(mesh.position);
@@ -5141,7 +5147,14 @@ window.downloadArtifact = async ({filename,mime,data,encoding='utf8',path=null,u
 // Named inspections live in the project, while each capture is an immutable bundle.
 const savedInspectionRows = new Map(), inspectionCalls = new Map();
 let restoringInspection = null, inspectionLoaded = null, inspectionBusy = false;
+let inspectionVerificationPolicy = null;
 const inspectionField = key => document.getElementById('inspection'+key);
+function inspectionPolicy(provenance) {
+  if (!provenance) return null;
+  return {accuracy_mm:provenance.absolute_deflection_mm,timeout_s:provenance.timeout_s,max_triangles:provenance.max_triangles,
+    feature_size_mm:provenance.feature_size_mm ?? null,memory_limit_mb:provenance.memory?.limit_mb};
+}
+inspectionField('sectionquality').onchange=()=>{inspectionVerificationPolicy=null;};
 function inspectionRequest(type, fields={}) {
   if (!sock || sock.readyState!==WebSocket.OPEN) return Promise.reject(new Error('Reconnect to save or capture an inspection.'));
   const request_id=crypto.randomUUID();
@@ -5161,18 +5174,22 @@ function captureViewState() {
   const entry=parts.get(current), target=entry?.target;
   const region=inspectionRegionName || selectedFeatureRegion()?.name || null;
   const sectionPosition=cutting && cutSign ? plane.constant/cutSign-(inspectionMode==='section' || cutAxis!=='z'?mesh.position[cutAxis]:0) : cutMm;
+  const sectionSource=inspectionField('sectionquality').value;
+  const policy=sectionSource==='verified' ? inspectionVerificationPolicy || inspectionPolicy(target?.verification?.provenance) : null;
   return {camera:{position_mm:camera.position.clone().sub(mesh.position).toArray(),target_mm:controls.target.clone().sub(mesh.position).toArray(),up:camera.up.toArray(),zoom:camera.zoom,height_mm:camera.top-camera.bottom},
     viewport:[main.clientWidth,main.clientHeight],mode:inspectionMode,hidden_components:[...hiddenComponents].sort(),
     section:{enabled:cutting,axis:cutAxis,position_mm:sectionPosition,fraction:cutAt,sign:cutSign || 1},
     alignment:comparePreview.get(current)?.transform || target?.transform || [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],
     tolerance_mm:inspectionToleranceOverride ?? Number(document.getElementById('comparetolerance').value || target?.tolerance_mm || .1),region,
     station:Number(featureField('station').value || 0),deviation_scale_mm:compareScale,deviation_map:compareMap,
-    deviation_auto:compareAuto,deviation_through:compareThrough,pins:pinsWanted,symmetry_plane:!!symmetryPlane};
+    deviation_auto:compareAuto,deviation_through:compareThrough,pins:pinsWanted,symmetry_plane:!!symmetryPlane,
+    section_source:sectionSource,verification_policy:policy};
 }
 function savedInspectionState(entry) {
   if (inspectionLoaded && (inspectionLoaded.name!==entry?.name || inspectionLoaded.token!==entry?.token)) {
     inspectionField('status').textContent='The displayed model rebuilt. Refresh the list to check saved evidence; restore a setup or save this new view.';
     inspectionLoaded=null;
+    inspectionVerificationPolicy=null;
   }
 }
 async function savedInspectionList() {
@@ -5206,6 +5223,12 @@ async function inspectionBuildVisibleConfiguration() {
 }
 async function applyInspectionView(item, freshness={status:'current'},sections=null) {
   const entry=parts.get(current), state=item.view;
+  inspectionField('sectionquality').value=state.section_source || 'preview';
+  inspectionVerificationPolicy=state.verification_policy || null;
+  if (inspectionVerificationPolicy) {
+    for (const [id,key] of [['verifyaccuracy','accuracy_mm'],['verifyseconds','timeout_s'],['verifytriangles','max_triangles'],['verifyfeature','feature_size_mm'],['verifymemory','memory_limit_mb']])
+      document.getElementById(id).value=inspectionVerificationPolicy[key] ?? '';
+  }
   if (item.part!==current || !mesh || mesh.userData.token!==entry?.token) throw new Error('Wait for this inspection’s part to finish building.');
   if (state.mode!=='model') {
     await ghostAttach(current,entry);
@@ -5320,11 +5343,19 @@ async function inspectionAction(action) {
       // The restored configuration can have the same parameter values but a different draft state.
       await savedInspectionList();
       const row=savedInspectionRows.get(current)?.find(item=>item.id===response.setup.id);
-      const sections=await inspectionRequest('inspection_sections',{id:response.setup.id});
-      await applyInspectionView(response.setup,row?.freshness || {status:'unknown'},sections.sections);
+      const freshness=row?.freshness || {status:'unknown'};
+      await applyInspectionView(response.setup,freshness);
+      let unavailable='';
+      try {
+        const sections=await inspectionRequest('inspection_sections',{id:response.setup.id});
+        await applyInspectionView(response.setup,freshness,sections.sections);
+      } catch(error) {
+        if (response.setup.view.section_source!=='verified') throw error;
+        unavailable=' Verified sections require a new precise verification. Its saved policy has been restored in Verify with a finer CAD mesh.';
+      }
       restoringInspection=null;
       inspectionField('label').value=response.setup.name;
-      inspectionField('status').textContent=`Restored ${response.setup.name}. Saved evidence is ${row?.freshness.status || 'unknown'}.`;
+      inspectionField('status').textContent=`Restored ${response.setup.name}. Saved evidence is ${row?.freshness.status || 'unknown'}.${unavailable}`;
       return;
     }
     if (featureDirty) throw new Error('Save the feature region edits before recording an inspection.');
@@ -5415,6 +5446,7 @@ function connect() {
   };
   ws.onmessage = ev => {
     const msg = JSON.parse(ev.data);
+    if (typeof msg.draft==='boolean') { polished=!msg.draft; polishBadge(); }
     bedUpdate(msg.bed);
     if ('printer' in msg) plateCaption(msg.printer, bedXY, msg.profiles);
     if (msg.type === 'sync') {

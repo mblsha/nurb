@@ -115,6 +115,26 @@ def feature_record(raw):
         fields = ("geometry", "reference", "alignment", "configuration", "feature", "token")
         result["review"] = {"identity": {key: _text(review["identity"].get(key), f"review {key}", 128) for key in fields},
                             "note": _text(review.get("note", ""), "review note")}
+        if "source" in review:
+            if review["source"] not in ("preview","verified"):
+                raise ValueError("feature review source must be preview or verified")
+            result["review"]["source"]=review["source"]
+        if "verification_request_id" in review:
+            result["review"]["verification_request_id"]=_text(review["verification_request_id"],"verification request ID",128)
+        if review.get("source")=="verified" and not result["review"].get("verification_request_id"):
+            raise ValueError("verified feature review needs its verification request ID")
+        if "provenance" in review:
+            if not isinstance(review["provenance"],dict):
+                raise ValueError("feature review provenance must be an object")
+            try: encoded=json.dumps(review["provenance"],allow_nan=False)
+            except (TypeError,ValueError) as exc: raise ValueError("feature review provenance needs finite JSON values") from exc
+            if len(encoded)>32768: raise ValueError("feature review provenance exceeds 32 KiB")
+            # Cards are TOML, which has no null. An absent optional bound still means unknown.
+            def without_null(value):
+                if isinstance(value,dict): return {key:without_null(item) for key,item in value.items() if item is not None}
+                if isinstance(value,list): return [without_null(item) for item in value if item is not None]
+                return value
+            result["review"]["provenance"]=without_null(json.loads(encoded))
     return result
 
 
