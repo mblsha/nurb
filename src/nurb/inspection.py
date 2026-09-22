@@ -199,13 +199,25 @@ def sections(server,entry,item):
     region=item.get('region')
     if not region or not region.get('feature',{}).get('sections'):
         return None
+    target=entry.get('target') or {}; precise=target.get('verification') or {}
+    current_region=next((value for value in target.get('regions',[]) if value.get('name')==region.get('name')),None)
+    if (precise.get('status')=='measured' and precise.get('token')==entry.get('token')
+            and current_region==region and item['view']['alignment']==target.get('transform')
+            and item['view']['tolerance_mm']==target.get('tolerance_mm')):
+        matches=[result for result in (precise.get('metrics') or {}).get('feature_evidence',[]) if result.get('id')==region['feature']['id']]
+        if len(matches)==1:
+            result=copy.deepcopy(matches[0])
+            return {'id':result['id'],'cad':result.get('cad',[]),'reference':result.get('reference',[]),
+                    'source':'verified','verification_request_id':result.get('verification_request_id'),
+                    'provenance':result.get('provenance'), 'method':result.get('method')}
     cad, components=server._comparison_meshes(entry)
     target=entry['target']; reference=server._target_mesh(target['file'],target.get('units'))['mesh'].copy()
     reference.apply_transform(compare._transform(item['view']['alignment']))
     cad,reference=feature_evidence.selected_meshes(entry['shape'],cad,reference,region,components)
     definitions=region['feature']['sections']
     return {'id':region['feature']['id'],'cad':feature_evidence.sections(cad,definitions),
-            'reference':feature_evidence.sections(reference,definitions), 'provenance':'Display mesh estimate; saved local frame and station definitions.'}
+            'reference':feature_evidence.sections(reference,definitions), 'source':'preview',
+            'provenance':{'method':'Display mesh estimate; saved local frame and station definitions.','absolute_deflection_mm':None}}
 
 
 def comparison(server, entry, item):

@@ -249,8 +249,8 @@ fields.regionexisting.value='B';fields.regionname.value='edited';regionSave();as
 
 def test_feature_sections_expire_on_rebuild_even_before_new_metrics_arrive():
     js([("function featureEditorState(", "function featureInspect(")], """
-function featureExportState() {}
-const fields={freshness:{},inspect:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{}};
+function featureExportState() {} function featureVerifiedResult(){return null;}
+const fields={freshness:{},inspect:{},verified:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{}};
 const featureField=id=>fields[id], current='part';
 const selectedFeatureRegion=()=>({feature:{id:'rim'}});
 let featureInspection={name:'part',token:'old-build'}, featureDirty=false;
@@ -264,9 +264,10 @@ assert.match(fields.status.textContent,/expired/);
 
 
 def test_feature_rename_preserves_identity_and_other_saved_series():
-    js([("function featureRegionValues(", "function featureEditorLoad(")], """
+    js([("function featureSectionValue(", "function featureEditorLoad(")], """
 const previous={id:'stable-rim',feature_size_mm:.3,sections:[{name:'first'},{name:'second'}],review:{identity:{token:'old'}}};
 const selectedFeatureRegion=()=>({feature:previous});
+let featureSectionDrafts=structuredClone(previous.sections),featureSectionIndex=0;
 const fields={enabled:{checked:true},point:{value:''},center:{value:'-3 0 0'},symmetrygroup:{value:'cushion holes'},size:{value:'0.3'},uncertainty:{value:''},sectionenabled:{checked:true},
  offsets:{value:'-1 0 1'},sectionname:{value:'Updated station'},origin:{value:'0 0 0'},normal:{value:'0 0 1'},
  x:{value:'1 0 0'},tolerance:{value:'0'},expected:{value:'small T'}};
@@ -283,15 +284,29 @@ assert.equal(result.feature.review.identity.token,'old');
 """)
 
 
+def test_multiple_section_series_can_be_selected_and_edited_independently():
+    js([("function featureSectionValue(", "function featureRegionValues(")], """
+function Option(text,value){this.text=text;this.value=value;}
+const fields={sectionchoice:{replaceChildren(...items){this.options=items;}},sectionremove:{},sectionenabled:{checked:true},extras:{},
+ sectionname:{value:''},origin:{value:''},normal:{value:''},x:{value:''},offsets:{value:''},tolerance:{value:''},expected:{value:''}};
+const featureField=id=>fields[id],inspectionVector=text=>text.split(' ').map(Number);
+let featureSectionDrafts=[{name:'front',origin_mm:[0,0,0],normal:[1,0,0],x_direction:[0,1,0],offsets_mm:[0],tolerance_mm:0,expected:''},
+ {name:'side',origin_mm:[1,2,3],normal:[0,1,0],x_direction:[1,0,0],offsets_mm:[-1,1],tolerance_mm:.01,expected:'T'}],featureSectionIndex=0;
+featureSectionLoad(0);fields.sectionname.value='front edited';featureSectionStore();featureSectionLoad(1);
+assert.equal(featureSectionDrafts[0].name,'front edited');assert.equal(fields.sectionname.value,'side');
+assert.equal(fields.normal.value,'0 1 0');assert.equal(fields.offsets.value,'-1 1');assert.equal(fields.sectionchoice.options.length,2);
+""")
+
+
 def test_precise_verification_rejects_late_build_results():
     js([("function verificationLanded(", "document.getElementById('verifycancel').onclick")], """
 const entry={token:'new',target:{verification:{status:'running'}}};
-const parts=new Map([['part',entry]]),current='part'; let renders=0;
-const verificationShow=()=>renders++;
+const parts=new Map([['part',entry]]),current='part'; let renders=0,editorUpdates=0;
+const verificationShow=()=>renders++,featureEditorState=()=>editorUpdates++;
 verificationLanded({name:'part',token:'old',status:'measured',metrics:{part:{max:0}}});
 assert.equal(entry.target.verification.status,'running'); assert.equal(renders,0);
 verificationLanded({name:'part',token:'new',status:'unknown',error:'deadline'});
-assert.equal(entry.target.verification.status,'unknown'); assert.equal(renders,1);
+assert.equal(entry.target.verification.status,'unknown'); assert.equal(renders,1);assert.equal(editorUpdates,1);
 assert.equal(entry.target.verification.metrics,undefined);
 """)
 
@@ -327,11 +342,11 @@ cutMm=1.25;sectionUpdate();assert.equal(plane.constant/cutSign-mesh.position.z,1
 
 
 def test_feature_scale_survives_editor_load_save_and_can_be_cleared_explicitly():
-    js([("function featureRegionValues(", "function featureEditorState(")], """
+    js([("function featureSectionValue(", "function featureEditorState(")], """
 const previous={id:'stable-rim',feature_size_mm:.3,role:'small headset lip'};
 const selectedFeatureRegion=()=>({feature:previous}), current='part', parts=new Map();
-const fields=new Map(), featureField=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,setAttribute(){}});return fields.get(id);};
-let featureDirty=false,featureInspection=null;
+const Option=(text,value)=>({text,value}),fields=new Map(), featureField=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,setAttribute(){},replaceChildren(){}});return fields.get(id);};
+let featureDirty=false,featureInspection=null,featureSectionDrafts=[],featureSectionIndex=0;
 function featureEditorState(){} function inspectionVector(text){return text.split(' ').map(Number);}
 featureEditorLoad({feature:previous});
 assert.equal(featureField('size').value,.3);
@@ -368,9 +383,9 @@ entry.token='rebuilt';await featureExportLanded(result);assert.equal(downloads.l
 
 def test_feature_scale_identity_change_expires_contours_even_with_same_build_token():
     js([("function featureEditorState(", "function featureInspect(")], """
-const fields={freshness:{},inspect:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{}};
+const fields={freshness:{},inspect:{},verified:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{}};
 const featureField=id=>fields[id], current='part';
-function featureExportState(){}
+function featureExportState(){} function featureVerifiedResult(){return null;}
 const selectedFeatureRegion=()=>({feature:{id:'rim',feature_size_mm:.1}});
 let featureInspection={name:'part',token:'same-build',result:{identity:{token:'old-scale'}}},featureDirty=false;
 featureEditorState({token:'same-build',target:{feature_evidence:[{id:'rim',status:'stale',identity:{token:'new-scale'}}]}});
@@ -385,8 +400,9 @@ def test_editing_feature_scale_immediately_replaces_the_current_review_label():
     js([("function featureEditorState(", "function featureInspect("),
         ("function featureExportState(", "function featureExport(")], """
 const current='part',entry={token:'build',target:{feature_evidence:[{id:'rim',status:'current'}]}},parts=new Map([[current,entry]]);
-const fields={freshness:{},inspect:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{},json:{},svg:{}};
+const fields={freshness:{},inspect:{},verified:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{},json:{},svg:{}};
 const featureField=id=>fields[id],selectedFeatureRegion=()=>({feature:{id:'rim',feature_size_mm:.3}});
+function featureVerifiedResult(){return null;}
 let featureDirty=false,featureInspection={name:'part',token:'build',result:{id:'rim',identity:{token:'known'},cad:[{}]}},listener;
 const document={getElementById:()=>({addEventListener:(event,callback)=>{listener=callback;}})};
 let symmetryRefreshes=0;function symmetryPanel(){symmetryRefreshes++;}
@@ -417,11 +433,11 @@ assert.equal(symmetryFresh(entry,report),false);
 
 
 def test_explicit_center_editor_roundtrip_and_clear_do_not_restore_a_hidden_alias():
-    js([("function featureRegionValues(", "function featureEditorState(")], """
+    js([("function featureSectionValue(", "function featureEditorState(")], """
 const previous={id:'center',point_mm:[-3,0,0],symmetry_group:'cushion holes'};
 const selectedFeatureRegion=()=>({feature:previous}),current='part',parts=new Map();
-const fields=new Map(),featureField=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,setAttribute(){}});return fields.get(id);};
-let featureDirty=false,featureInspection=null;
+const Option=(text,value)=>({text,value}),fields=new Map(),featureField=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,setAttribute(){},replaceChildren(){}});return fields.get(id);};
+let featureDirty=false,featureInspection=null,featureSectionDrafts=[],featureSectionIndex=0;
 function featureEditorState(){}function inspectionVector(text){return text.split(' ').map(Number);}
 featureEditorLoad({feature:previous});
 assert.equal(featureField('center').value,'-3 0 0');assert.equal(featureField('symmetrygroup').value,'cushion holes');

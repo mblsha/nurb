@@ -250,6 +250,32 @@ def test_server_exports_only_current_sections_with_honest_preview_provenance(tmp
     assert "expired" in messages[-1]["error"]
 
 
+def test_viewer_verification_returns_and_exports_bounded_feature_sections(tmp_path):
+    part, server, messages = project(tmp_path)
+    token = server.state["thing"]["token"]
+
+    async def exercise():
+        await server.command(json.dumps({"type": "target_verify", "name": "thing", "accuracy_mm": .02,
+                                         "timeout_s": 30, "max_triangles": 50000}))
+        await server.verifications["thing"]
+        verified = messages[-1]
+        result = verified["metrics"]["feature_evidence"][0]
+        await server.command(json.dumps({"type": "feature_export", "name": "thing", "token": token,
+                                         "feature_id": "headset-rim", "identity": result["identity"],
+                                         "verification_request_id": verified["request_id"], "format": "json", "station": 0}))
+        return verified, result, messages[-1]
+
+    verified, result, exported = asyncio.run(exercise())
+    assert verified["status"] == "measured"
+    assert result["source"] == "verified"
+    assert len(result["cad"]) == len(result["reference"]) == 3
+    assert result["provenance"]["absolute_deflection_mm"] == .02
+    payload = json.loads(exported["artifact"]["data"])
+    assert payload["source"] == "verified"
+    assert payload["verification_request_id"] == verified["request_id"]
+    assert payload["provenance"]["absolute_deflection_mm"] == .02
+
+
 def test_feature_export_rejects_source_edits_before_watcher_rebuild(tmp_path):
     part, server, messages = project(tmp_path)
     request = {"type": "feature_inspection", "name": "thing", "token": server.state["thing"]["token"], "feature_id": "headset-rim"}

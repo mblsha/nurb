@@ -134,6 +134,47 @@ def test_websocket_save_restore_and_capture_and_cli_list(tmp_path,monkeypatch,ca
     assert result['setups'][0]['status']=='current'
 
 
+def test_restore_returns_authoritative_draft_state_for_the_polish_control(tmp_path):
+    part,server,messages=project(tmp_path)
+    server.draft=True;entry=server.rebuild(part)
+    saved=inspection.save(server,part,entry,state(),'Draft rim')
+    server.draft=False;server.rebuild(part)
+    asyncio.run(server.command(json.dumps({'type':'inspection_restore','name':'thing','id':saved['id']})))
+    assert messages[-1]['draft'] is True
+    assert server.draft is True
+
+
+def test_saved_capture_prefers_current_verified_sections(tmp_path):
+    part,server,_=project(tmp_path);entry=server.state['thing']
+    saved=inspection.save(server,part,entry,state(),'Verified rim')
+    preview=inspection.sections(server,entry,saved)
+    precise={**preview,'source':'verified','verification_request_id':'precise-1',
+             'provenance':{'absolute_deflection_mm':.005,'measured_error_bound_mm':None}}
+    precise.update(entry['target']['feature_evidence'][0])
+    entry['target']['verification']={'status':'measured','token':entry['token'],
+        'request_id':'precise-1','metrics':{'feature_evidence':[precise]}}
+    result=inspection.sections(server,entry,saved)
+    assert result['source']=='verified'
+    assert result['verification_request_id']=='precise-1'
+    assert result['provenance']['absolute_deflection_mm']==.005
+
+
+def test_headless_saved_capture_draws_requested_symmetry_plane(tmp_path):
+    pytest.importorskip('playwright',reason='nurb render is an optional extra')
+    from PIL import Image,ImageChops
+    from nurb import render
+    part,server,_=project(tmp_path);entry=server.state['thing']
+    saved=inspection.save(server,part,entry,state(mode='model'),'Symmetry plane')
+    saved['view']['symmetry_plane']=True
+    saved['verification']['symmetry']={'status':'measured','plane':{'normal':[1,0,0],'offset_mm':0}}
+    hidden=copy.deepcopy(saved);hidden['view']['symmetry_plane']=False
+    shown_path=tmp_path/'shown.png';hidden_path=tmp_path/'hidden.png'
+    render.snapshots(tmp_path,[{'part':part,'file':shown_path,'view':'iso','setup':saved,'mode':'model'},
+                               {'part':part,'file':hidden_path,'view':'iso','setup':hidden,'mode':'model'}])
+    shown=Image.open(shown_path).convert('RGB');plain=Image.open(hidden_path).convert('RGB')
+    assert ImageChops.difference(shown,plain).getbbox() is not None
+
+
 def test_capture_download_rejects_paths_outside_fixed_bundle_directory(tmp_path):
     _,server,_=project(tmp_path)
     response=asyncio.run(server.http(None,SimpleNamespace(path='/inspection-evidence/../../secret',headers={})))

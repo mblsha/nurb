@@ -53,7 +53,7 @@ async def handle(server,path,message,client):
                 server.overrides[path.stem]=copy.deepcopy(values)
                 for rebuild_path in builder.find_parts(server.root) if draft_changed else [path]:
                     server.queue.put_nowait(str(rebuild_path))
-                response.update(setup=item,restoring=True,previous_token=entry.get('token'))
+                response.update(setup=item,restoring=True,previous_token=entry.get('token'),draft=server.draft)
             elif action in ('inspection_save','inspection_prepare'):
                 entry=require_current(server,path,message)
                 state=inspection.view_state(message.get('view'))

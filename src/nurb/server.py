@@ -8,6 +8,7 @@ import asyncio
 import base64
 import binascii
 import collections
+import copy
 import hashlib
 import io
 import json
@@ -865,7 +866,7 @@ class Server:
             reference=hit["mesh"].copy()
             identity={"token":request["token"],"reference_stamp":target["stamp"],"shape_id":entry.get("shape_id"),"build_inputs":source_identity}
             source_files=bounded.file_identity(paths)
-            return compare.prepare_precise(shape,reference,snapshot["tolerance_mm"],snapshot["transform"],snapshot["regions"],policy,
+            return compare.prepare_precise(shape,reference,snapshot["tolerance_mm"],snapshot["transform"],snapshot["regions"],policy,feature_sections=True,
                 envelope={"identity":identity,"stamps":stamps},source_files=source_files)
 
         try:
@@ -878,6 +879,17 @@ class Server:
                 response.update(status="stale",phase="Superseded",reason="stale",error="The model or reference changed during verification; run it again.")
             else:
                 metrics=measured["metrics"]
+                records={record["id"]:record for record in target.get("feature_evidence",[]) if record.get("id")}
+                metrics["feature_evidence"]=[]
+                for regional in metrics.get("inspection_regions",[]):
+                    sections=regional.get("local_sections")
+                    feature=(regional.get("selector") or {}).get("feature") or {}
+                    record=records.get(feature.get("id"))
+                    if sections and record:
+                        metrics["feature_evidence"].append({**copy.deepcopy(record),"frame":"part_mm","source":"verified",
+                            "method":"bounded absolute verification mesh contours; not exact B-rep curves; no fit certification",
+                            "verification_request_id":request["request_id"],"provenance":copy.deepcopy(metrics.get("provenance",{})),
+                            "cad":sections.get("cad",[]),"reference":sections.get("reference",[])})
                 response.update(status="measured",phase="Complete",metrics=metrics,identity=measured["identity"],provenance=metrics["provenance"],resources=measured["resources"])
         except asyncio.CancelledError:
             stopped.set()
@@ -1834,7 +1846,17 @@ class Server:
                                 "cad": feature_evidence.sections(cad, definitions),
                                 "reference": feature_evidence.sections(reference, definitions)}
 
-                    result = await asyncio.to_thread(inspect_feature)
+                    verification_id=msg.get("verification_request_id") if msg["type"]=="feature_export" else None
+                    if verification_id:
+                        verified=target.get("verification") or {}
+                        if verified.get("status")!="measured" or verified.get("token")!=token or verified.get("request_id")!=verification_id:
+                            raise ValueError("verified section evidence expired; run precise verification again")
+                        matches=[item for item in (verified.get("metrics") or {}).get("feature_evidence",[]) if item.get("id")==region["feature"]["id"]]
+                        if len(matches)!=1:
+                            raise ValueError("precise verification did not produce sections for this feature")
+                        result=copy.deepcopy(matches[0])
+                    else:
+                        result = await asyncio.to_thread(inspect_feature)
                     if (self.state.get(name) is not entry or target.get("stale") or target["transform"] != transform
                             or self._target_mesh(target["file"], target.get("units"))["stamp"] != stamp
                             or path.with_suffix(".md").read_bytes() != card_bytes
