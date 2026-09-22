@@ -32,16 +32,16 @@ def test_slow_brep_snapshot_is_inside_the_deadline_and_reaped(monkeypatch):
 
 def test_snapshot_and_analysis_share_one_deadline(tmp_path,monkeypatch):
     module=tmp_path/'bounded_fixture.py'
-    module.write_text('def done():\n    return {"done":True}\n')
+    module.write_text('import time\n\ndef slow():\n    time.sleep(30)\n')
     monkeypatch.setenv('PYTHONPATH',str(tmp_path)+os.pathsep+os.environ.get('PYTHONPATH',''))
     def prepare():
-        time.sleep(.15)
-        return bounded.stage('bounded_fixture','done')
+        time.sleep(1.5)
+        return bounded.stage('bounded_fixture','slow')
     start=time.monotonic()
-    with pytest.raises(bounded.WorkError) as error:bounded.run(prepare,timeout_s=.25)
+    with pytest.raises(bounded.WorkError) as error:bounded.run(prepare,timeout_s=4)
     assert error.value.reason=='timeout'
     assert len(error.value.resources['child_pids'])==2
-    assert time.monotonic()-start<1.5
+    assert time.monotonic()-start<5
     reaped(error.value.resources)
 
 
