@@ -12,10 +12,11 @@ import struct
 import uuid
 import zipfile
 
-from . import compare, feature_evidence, symmetry
+from . import compare, feature_evidence, symmetry, validator_evidence
 
 MODES = ('model', 'reference', 'overlay', 'deviation', 'side-by-side', 'section')
 ID = re.compile(r'^[a-f0-9]{32}$')
+ENGINE_RUNTIME_PACKAGES = ('python','build123d','numpy','OCP_module')
 
 
 def vector(value, length, label):
@@ -158,7 +159,25 @@ def configuration(entry):
     return {'name':entry.get('variant') or 'default', 'parameters':{p['name']:p['value'] for p in entry.get('params',[])}}
 
 
+def engine_revision(source_root=None, runtime=None):
+    """Identify portable engine source and runtime versions without native CAD output."""
+    versions=runtime if runtime is not None else validator_evidence.runtime_versions(ENGINE_RUNTIME_PACKAGES)
+    document={'schema':'nurb-engine-recipe-v1','source_revision':validator_evidence.engine_source_digest(source_root),
+              'runtime_versions':{name:str(version) for name,version in sorted(versions.items())}}
+    return hashlib.sha256(json.dumps(document,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def build_recipe_identity(source_revision, current_configuration, draft, current_engine_revision=None):
+    """Identify deterministic build inputs after the model has built successfully."""
+    document={'schema':'nurb-build-recipe-v1','source_revision':str(source_revision),
+              'configuration':current_configuration,'draft':bool(draft),
+              'engine_revision':current_engine_revision or engine_revision()}
+    return hashlib.sha256(json.dumps(document,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+
+
 def identity(server, path, entry, state):
+    if 'shape' not in entry:
+        raise ValueError('the model must build successfully before saving or checking an inspection')
     target=entry.get('target') or {}
     reference=None
     if target.get('file'):
@@ -172,15 +191,20 @@ def identity(server, path, entry, state):
     region=next((r for r in target.get('regions',[]) if r['name']==state['region']),None)
     if state['region'] and not region:
         raise ValueError('the selected inspection region is missing; choose a current region')
-    fields={'geometry':feature_evidence.portable_shape_identity(entry['shape']), 'source_revision':symmetry.source_revision(path),
-            'reference':reference, 'configuration':configuration(entry), 'alignment':state['alignment'],
-            'tolerance_mm':state['tolerance_mm'], 'region':region, 'draft':bool(server.draft)}
+    source_revision=symmetry.source_revision(path)
+    current_configuration=configuration(entry)
+    draft=bool(server.draft)
+    current_engine_revision=engine_revision()
+    fields={'geometry':build_recipe_identity(source_revision,current_configuration,draft,current_engine_revision),
+            'source_revision':source_revision,'reference':reference,'configuration':current_configuration,
+            'alignment':state['alignment'],'tolerance_mm':state['tolerance_mm'],'region':region,'draft':draft,
+            'engine_revision':current_engine_revision}
     fields['token']=hashlib.sha256(json.dumps(fields,sort_keys=True,allow_nan=False).encode()).hexdigest()
     return fields
 
 
 def freshness(saved, current):
-    fields=('geometry','source_revision','reference','configuration','alignment','tolerance_mm','region','draft')
+    fields=('geometry','source_revision','engine_revision','reference','configuration','alignment','tolerance_mm','region','draft')
     changed=[key for key in fields if saved.get(key)!=current.get(key)]
     return {'status':'stale' if changed else 'current','changed':changed}
 
@@ -290,7 +314,7 @@ def report_text(evidence):
     lines=[f'# Inspection: {name}', '', f"Part: `{item['part']}`. Capture: {evidence['captured_at']}. Saved setup: **{evidence['freshness']['status']}**.", '',
            f"Mode: {state['mode']}. Tolerance: {state['tolerance_mm']:g} mm. Configuration: {json.dumps(current['configuration'],ensure_ascii=False)}.", '',
            f"Changed since the setup was saved: {', '.join(evidence['freshness']['changed']) or 'none'}.", '',
-           f"Geometry: `{current['geometry']}`. Model source revision: `{current['source_revision']}`.", '',
+           f"Build recipe: `{current['geometry']}`. Model source revision: `{current['source_revision']}`.", '',
            f"Reference: `{(current['reference'] or {}).get('file','none')}`. Content identity: `{(current['reference'] or {}).get('content','none')}`.", '',
            '![Captured inspection](view.png)', '',
            'The image shows the captured view. Evidence includes the exact camera, alignment, configuration, visibility and section settings. `model.glb` and `reference.glb`, when present, are the display meshes; they are not precision certificates.', '',

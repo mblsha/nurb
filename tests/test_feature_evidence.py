@@ -6,7 +6,7 @@ import json
 import numpy as np
 import pytest
 import trimesh
-from build123d import Box, Cylinder, Location, export_step
+from build123d import Box, Cylinder, export_step
 
 from nurb import builder, checks, cli, compare, feature_evidence as evidence, scan
 from nurb.server import Server
@@ -91,17 +91,6 @@ def test_exact_geometry_identity_ignores_display_meshing_but_changes_for_holes()
     builder.to_mesh(shape, 0.05)
     assert evidence.shape_identity(shape) == first
     assert evidence.shape_identity(shape - Cylinder(1, 10)) != first
-
-
-def test_portable_geometry_identity_tracks_topology_and_gross_placement_without_display_meshes():
-    shape = Box(10, 10, 6)
-    first = evidence.portable_shape_identity(shape)
-    builder.to_mesh(shape, 0.05)
-    assert evidence.portable_shape_identity(shape) == first
-    assert evidence.portable_shape_identity(shape - Cylinder(1, 10)) != first
-    assert evidence.portable_shape_identity(Box(10.05, 10, 6)) != first
-    assert evidence.portable_shape_identity(Location((0.05, 0, 0)) * shape) != first
-    assert evidence.portable_shape_identity(Cylinder(5, 10)) != evidence.portable_shape_identity(Cylinder(5.05, 10))
 
 
 @pytest.mark.parametrize("change", ["geometry", "reference", "alignment", "configuration", "role", "selection", "feature_size", "remove_size", "center", "symmetry_group"])

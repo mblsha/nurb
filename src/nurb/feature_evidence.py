@@ -196,52 +196,6 @@ def shape_identity(shape):
     return hashlib.sha256(body.getvalue()).hexdigest()
 
 
-def portable_shape_identity(shape):
-    """Fingerprint topology and gross placement without platform-sensitive measures."""
-    resolution_mm = 0.01
-
-    def number(value):
-        return round(float(value) / resolution_mm)
-
-    def point(value):
-        return [number(value.X), number(value.Y), number(value.Z)]
-
-    def bounds(value):
-        box = value.bounding_box()
-        return [point(box.min), point(box.max)]
-
-    def histogram(values):
-        result = {}
-        for value in values:
-            name = str(value.geom_type)
-            result[name] = result.get(name, 0) + 1
-        return dict(sorted(result.items()))
-
-    def topology(value):
-        edges = value.edges()
-        faces = value.faces()
-        return {
-            "vertices": len(value.vertices()),
-            "edges": len(edges),
-            "wires": len(value.wires()),
-            "faces": len(faces),
-            "shells": len(value.shells()),
-            "solids": len(value.solids()),
-            "edge_types": histogram(edges),
-            "face_types": histogram(faces),
-        }
-
-    solids = [{"bounds": bounds(solid), "topology": topology(solid)} for solid in shape.solids()]
-    document = {
-        "schema": "gross-topology-v1",
-        "resolution_mm": resolution_mm,
-        "bounds": bounds(shape),
-        "topology": topology(shape),
-        "solids": sorted(solids, key=lambda value: json.dumps(value, sort_keys=True)),
-    }
-    return _digest(document)
-
-
 def region_evidence(shape_id, reference_id, transform, configuration, region):
     feature = region["feature"]
     contract = {**feature, "selection": {key: region[key] for key in ("name", "bounds_mm", "component") if key in region}}

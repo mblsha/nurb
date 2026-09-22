@@ -11,7 +11,7 @@ import zipfile
 import pytest
 import trimesh
 
-from nurb import cli, compare, inspection, symmetry
+from nurb import cli, compare, inspection, symmetry, validator_evidence
 from nurb.server import Server
 
 
@@ -66,12 +66,39 @@ def test_source_revision_excludes_declared_validator_outputs_but_tracks_analytic
     assert symmetry.source_revision(part)!=before
 
 
-@pytest.mark.parametrize('change',['geometry','source','reference','configuration','alignment','tolerance','feature'])
+def test_build_recipe_tracks_source_configuration_draft_and_engine_inputs():
+    configuration={'name':'default','parameters':{'width':10.0,'count':2}}
+    first=inspection.build_recipe_identity('source-a',configuration,False,'engine-a')
+    assert inspection.build_recipe_identity('source-a',{'parameters':{'count':2,'width':10.0},'name':'default'},False,'engine-a')==first
+    assert inspection.build_recipe_identity('source-b',configuration,False,'engine-a')!=first
+    assert inspection.build_recipe_identity('source-a',{**configuration,'parameters':{'width':10.05,'count':2}},False,'engine-a')!=first
+    assert inspection.build_recipe_identity('source-a',configuration,True,'engine-a')!=first
+    assert inspection.build_recipe_identity('source-a',configuration,False,'engine-b')!=first
+
+
+def test_engine_revision_reuses_portable_source_bytes_and_runtime_versions(tmp_path):
+    first=tmp_path/'first';second=tmp_path/'second'
+    for root in (first,second):
+        (root/'nurb').mkdir(parents=True)
+        (root/'nurb/core.py').write_bytes(b'def build():\n    return 1\n')
+        (root/'entry.py').write_bytes(b'from nurb.core import build\n')
+    runtime={'python':'3.13.7','build123d':'1.2.3','numpy':'2.3.4','OCP_module':'7.8.9'}
+    identity=inspection.engine_revision(first,runtime)
+    assert validator_evidence.engine_source_digest(first)==validator_evidence.engine_source_digest(second)
+    assert inspection.engine_revision(second,dict(reversed(list(runtime.items()))))==identity
+    (second/'entry.py').touch()
+    assert inspection.engine_revision(second,runtime)==identity
+    (second/'nurb/core.py').write_bytes(b'def build():\n    return 2\n')
+    assert inspection.engine_revision(second,runtime)!=identity
+    assert inspection.engine_revision(first,{**runtime,'build123d':'1.2.4'})!=identity
+
+
+@pytest.mark.parametrize('change',['geometry','source','engine','reference','configuration','alignment','tolerance','feature'])
 def test_input_changes_are_explicitly_stale(tmp_path,change):
     part,server,_=project(tmp_path);entry=server.state['thing']
     saved=inspection.save(server,part,entry,state(),'Rim')
     current=copy.deepcopy(saved['identity'])
-    key={'source':'source_revision','tolerance':'tolerance_mm','feature':'region'}.get(change,change)
+    key={'source':'source_revision','engine':'engine_revision','tolerance':'tolerance_mm','feature':'region'}.get(change,change)
     current[key]=None
     result=inspection.freshness(saved['identity'],current)
     assert result=={'status':'stale','changed':[key]}
