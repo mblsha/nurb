@@ -355,6 +355,115 @@ def test_embedded_verified_exports_capture_and_cancellation(tmp_path):
     finally:done.set()
 
 
+def test_queued_verification_can_be_cancelled_before_broadcast_finishes(tmp_path):
+    _,server,_=project(tmp_path)
+    messages=[]
+    async def send(message):
+        messages.append(copy.deepcopy(message))
+        if message.get('status')=='queued':
+            await server.command(json.dumps({'type':'target_verify','name':'thing'}))
+            await server.command(json.dumps({'type':'target_verify_cancel','name':'thing','token':message['token'],'request_id':message['request_id']}))
+    server.send=send
+    async def exercise():
+        await server.command(json.dumps({'type':'target_verify','name':'thing'}))
+        await server.verifications['thing']
+    asyncio.run(exercise())
+    assert [message['status'] for message in messages]==['queued','unknown','cancelling','cancelled']
+    assert messages[1]['current_verification']['request_id']==messages[0]['request_id']
+    assert messages[-1]['request_id']==messages[0]['request_id']
+    assert server.state['thing']['target']['verification']['status']=='cancelled'
+    assert not server.verifications and not server.verification_controls
+
+
+def test_rejected_verification_policy_invalidates_the_previous_request_for_every_viewer(tmp_path):
+    _,server,messages=project(tmp_path)
+    entry=server.state['thing']
+    entry['target']['verification']={'status':'measured','token':entry['token'],'request_id':'previous'}
+    asyncio.run(server.command(json.dumps({'type':'target_verify','name':'thing','timeout_s':0})))
+    assert messages[-1]['status']=='unknown'
+    assert messages[-1]['replaces_request_id']=='previous'
+    assert entry['target']['verification']['request_id']==messages[-1]['request_id']
+
+
+def test_running_verification_survives_interface_switch_and_second_viewer_cancel(tmp_path,monkeypatch):
+    pytest.importorskip('playwright',reason='nurb render is an optional extra')
+    from playwright.sync_api import sync_playwright
+    from nurb import bounded, render
+    part,server,_=project(tmp_path)
+    regions=copy.deepcopy(server.state['thing']['target']['regions'])
+    side=copy.deepcopy(regions[0]);side['name']='Side';side['feature']['id']='side'
+    side['feature']['sections'][0].update(name='Side stations',normal=[1,0,0],x_direction=[0,1,0])
+    compare.update_card(part,regions=regions+[side]);server.rebuild(part);server.check(part)
+    prepare=compare.prepare_precise
+    def pause_snapshot(*args,**kwargs):
+        import time
+        bounded.phase('Waiting in test snapshot preparation')
+        time.sleep(20)
+        return prepare(*args,**kwargs)
+    # Keep a real bounded child alive while both browser sockets change selection.
+    monkeypatch.setattr(compare,'prepare_precise',pause_snapshot)
+    server.send=Server.send.__get__(server);server.port=render.free_port();done=render._host(server)
+    try:
+        with sync_playwright() as pw:
+            browser=render._launch(pw)
+            first=browser.new_page(viewport={'width':1280,'height':960})
+            first.goto(f'http://127.0.0.1:{server.port}/?part=thing&embed');first.wait_for_function('window.__nurb?.ready')
+            first.locator('#evidenceinterface').select_option('Rim');first.locator('#verifyrun').click()
+            first.wait_for_function("document.querySelector('#verifystatus').textContent==='Waiting in test snapshot preparation'")
+            request=server.state['thing']['target']['verification']['request_id']
+            first.locator('#evidenceinterface').select_option('Side')
+            assert first.locator('#verifyrun').is_disabled()
+            assert first.locator('#verifycancel').is_enabled()
+            assert first.locator('#inspectioncapture').is_disabled()
+            first.screenshot(path=str(tmp_path/'running-verification-after-interface-switch.png'))
+            second=browser.new_page(viewport={'width':1280,'height':960})
+            second.goto(f'http://127.0.0.1:{server.port}/?part=thing&embed');second.wait_for_function('window.__nurb?.ready')
+            assert second.locator('#verifyrun').is_disabled()
+            assert second.locator('#verifycancel').is_enabled()
+            second.locator('#evidenceinterface').select_option('Rim')
+            assert second.locator('#verifyrun').is_disabled()
+            assert second.locator('#verifycancel').is_enabled()
+            assert server.state['thing']['target']['verification']['request_id']==request
+            second.locator('#verifycancel').click()
+            for page in (first,second):
+                page.wait_for_function("document.querySelector('#verifystatus').textContent.toLowerCase().includes('cancelled')")
+                assert page.locator('#verifycancel').is_disabled()
+                assert page.locator('#verifyrun').is_enabled()
+                assert page.locator('#featurejson').is_disabled()
+            assert server.state['thing']['target']['verification']['request_id']==request
+            assert not server.verifications and not server.verification_controls
+            second.screenshot(path=str(tmp_path/'second-viewer-cancelled-verification.png'))
+            browser.close()
+    finally:done.set()
+
+
+def test_whole_model_verification_without_saved_interfaces_in_real_viewer(tmp_path):
+    pytest.importorskip('playwright',reason='nurb render is an optional extra')
+    from playwright.sync_api import sync_playwright
+    from nurb import render
+    part,server,_=project(tmp_path)
+    compare.update_card(part,regions=[]);server.rebuild(part);server.check(part)
+    server.send=Server.send.__get__(server);server.port=render.free_port();done=render._host(server)
+    try:
+        with sync_playwright() as pw:
+            browser=render._launch(pw);page=browser.new_page(viewport={'width':1280,'height':960})
+            page.goto(f'http://127.0.0.1:{server.port}/?part=thing&embed');page.wait_for_function('window.__nurb?.ready')
+            assert page.locator('#evidenceinterface option').count()==1
+            assert page.locator('#verifyrun').is_enabled()
+            assert page.locator('#featureinspect').is_disabled()
+            page.locator('#verifyrun').click()
+            page.wait_for_function("document.querySelector('#verifystatus').textContent==='Complete'",timeout=30000)
+            result=server.state['thing']['target']['verification']
+            assert result['status']=='measured' and result['metrics']['part'] and result['metrics']['target']
+            assert not result['metrics']['feature_evidence']
+            assert page.locator('#verifyrun').is_enabled()
+            for button in ('featureinspect','featureverified','featurejson','featuresvg'):
+                assert page.locator('#'+button).is_disabled()
+            page.screenshot(path=str(tmp_path/'whole-model-precise-verification.png'))
+            browser.close()
+    finally:done.set()
+
+
 def test_capture_download_rejects_paths_outside_fixed_bundle_directory(tmp_path):
     _,server,_=project(tmp_path)
     response=asyncio.run(server.http(None,SimpleNamespace(path='/inspection-evidence/../../secret',headers={})))

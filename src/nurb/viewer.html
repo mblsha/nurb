@@ -922,7 +922,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { SpaceMouseControls } from '/spacemouse.js';
-import { inspectionActions, inspectionGuidance, inspectionInitial, inspectionTransition, policyFromProvenance,
+import { inspectionActions, inspectionGuidance, inspectionHydrateVerification, inspectionInitial, inspectionTransition, policyFromProvenance,
   sectionSeriesAdd, sectionSeriesInitial, sectionSeriesRemove, sectionSeriesSelect, sectionSeriesSelected, sectionSeriesUpdate } from '/inspection-state.js';
 
 const parts = new Map();
@@ -2007,6 +2007,7 @@ function featureEditorState(entry) {
     evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'rebuild',token:entry.token,freshness:entry.target?.stale?'stale':'current'});
   evidenceWorkflow={...evidenceWorkflow,part:current,token:entry?.token,interfaceId:selected?.feature?.id || null,
     freshness:entry?.target?.stale?'stale':evidenceWorkflow.freshness,dirty:featureDirty};
+  evidenceWorkflow=inspectionHydrateVerification(evidenceWorkflow,entry);
   evidenceRender();
   featureField('verified').disabled = featureDirty || !featureVerifiedResult(entry,selected?.feature?.id);
   if (featureInspection && (featureInspection.name !== current || featureInspection.token !== entry?.token || entry?.target?.stale
@@ -2166,6 +2167,7 @@ function verificationShow(entry) {
   if (entry?.target?.verification) verificationHistory.set(entry.name,entry.target.verification);
   const state = entry?.target?.verification || verificationHistory.get(entry?.name), output = document.getElementById('verifyresult');
   const currentState = state && state.token === entry?.token && !entry?.target?.stale;
+  evidenceWorkflow=inspectionHydrateVerification(evidenceWorkflow,entry);
   evidenceRender();
   output.replaceChildren();
   const status = document.getElementById('verifystatus');
@@ -2191,15 +2193,15 @@ function verificationShow(entry) {
   } else if (['unknown','stale','cancelled'].includes(state.status)) add('No precise measurement was produced for this request.');
 }
 function verificationLanded(message) {
+  if (message.current_verification) message=message.current_verification;
   const entry=parts.get(message.name);
   if (!entry?.target || message.token !== entry.token) return;
   const previous=entry.target.verification;
-  if (previous?.request_id && message.request_id !== previous.request_id && message.status !== 'queued') return;
+  if (previous?.request_id && message.request_id !== previous.request_id && message.status !== 'queued'
+      && message.replaces_request_id !== previous.request_id) return;
   entry.target.verification=message;
   if (message.name === current) {
-    const policy=policyFromProvenance(message.provenance);
-    if (['unknown','stale','cancelled'].includes(message.status)) evidenceMove({type:'verify-failed',requestId:message.request_id,status:message.status,error:message.error || 'Verification produced no result.'});
-    else evidenceMove({type:'verify-progress',requestId:message.request_id,status:message.status,policy});
+    evidenceWorkflow=inspectionHydrateVerification(evidenceWorkflow,entry);
     if (message.status==='measured') {
       const result=featureVerifiedResult(entry);
       if (result) featureInspectionLanded({name:current,token:entry.token,result});

@@ -19,6 +19,7 @@ export function inspectionInitial(fields = {}) {
     setupId: fields.setupId ?? null,
     source: fields.source === 'verified' ? 'verified' : 'preview',
     freshness: fields.freshness ?? 'unknown',
+    referenceReady: !!fields.referenceReady,
     dirty: !!fields.dirty,
     sections: {status: 'idle', source: null, requestId: null, error: null, ...(fields.sections || {})},
     verification: {status: 'idle', requestId: null, policy: null, error: null, ...(fields.verification || {})},
@@ -28,6 +29,21 @@ export function inspectionInitial(fields = {}) {
 
 function sameRequest(state, event) {
   return !state.verification.requestId || !event.requestId || state.verification.requestId === event.requestId;
+}
+
+export function inspectionHydrateVerification(state, entry) {
+  const referenceReady = !!(entry?.token && entry.token === state.token && entry.target
+    && !entry.error && !entry.target.error && !entry.target.stale);
+  const packet = entry?.target?.verification;
+  const current = referenceReady && packet?.token === entry.token;
+  const verification = current
+    ? {status:packet.status,requestId:packet.request_id ?? null,policy:policyFromProvenance(packet.provenance),error:packet.error ?? null}
+    : {status:packet ? 'stale' : 'idle',requestId:null,policy:state.verification.policy,error:null};
+  const next = {...state,referenceReady,verification};
+  // A server packet can invalidate displayed contours, but only loaded contours can make sections ready.
+  if (next.sections.source === 'verified' && (verification.status !== 'measured' || next.sections.requestId !== verification.requestId))
+    next.sections = {...next.sections,status:'stale',error:verification.error};
+  return next;
 }
 
 export function inspectionTransition(state, event) {
@@ -105,8 +121,8 @@ export function inspectionActions(state) {
   const current = state.freshness !== 'stale' && !state.dirty;
   return {
     inspect: selected && current && !active,
-    verify: selected && current && !active,
-    cancel: active && !!state.verification.requestId,
+    verify: state.referenceReady && current && !active,
+    cancel: active && !!state.verification.requestId && state.verification.status !== 'cancelling',
     save: current && !active,
     capture: current && (!selected || sectionsReady) && !active && state.capture.status !== 'capturing',
     sectionsReady,
@@ -115,10 +131,10 @@ export function inspectionActions(state) {
 
 export function inspectionGuidance(state) {
   const actions = inspectionActions(state);
-  if (!state.interfaceId) return '1. Select a named interface or restore a saved setup.';
+  if (VERIFY_ACTIVE.has(state.verification.status)) return state.verification.status === 'cancelling' ? 'Stopping verification…' : 'Verification is running. You can cancel it.';
+  if (!state.interfaceId) return state.referenceReady ? 'Verify the whole model, or select a named interface to inspect local sections.' : 'Attach a reference to verify the model or inspect local sections.';
   if (state.dirty) return 'Save the interface edits before inspecting evidence.';
   if (state.freshness === 'stale') return 'This setup is stale. Restore or save it against the current model.';
-  if (VERIFY_ACTIVE.has(state.verification.status)) return state.verification.status === 'cancelling' ? 'Stopping verification…' : 'Verification is running. You can cancel it.';
   if (state.verification.error && state.source === 'verified') return `${state.verification.error} No preview was substituted.`;
   if (!actions.sectionsReady) return state.source === 'verified' ? '2. Inspect a preview if useful, then run Verify to produce bounded section evidence.' : '2. Inspect sections to review the selected interface.';
   if (state.source === 'preview') return '3. Preview sections are ready. Verify for bounded evidence, or save this preview setup.';

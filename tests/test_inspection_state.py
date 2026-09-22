@@ -95,6 +95,41 @@ assert.equal(state.inspectionActions(flow).capture,false);
 """)
 
 
+def test_authoritative_verification_hydrates_selection_and_expires_other_requests():
+    run_js("""
+let flow=state.inspectionInitial({part:'seal',token:'build',interfaceId:'rim',freshness:'current'});
+const entry={name:'seal',token:'build',target:{verification:{token:'build',request_id:'request-a',status:'running'}}};
+flow=state.inspectionHydrateVerification(flow,entry);
+assert.equal(state.inspectionActions(flow).cancel,true);assert.equal(state.inspectionActions(flow).verify,false);
+flow=state.inspectionTransition(flow,{type:'select',part:'seal',token:'build',interfaceId:'holes',freshness:'current'});
+flow=state.inspectionHydrateVerification(flow,entry);
+assert.equal(flow.verification.requestId,'request-a');assert.equal(state.inspectionActions(flow).cancel,true);
+entry.target.verification.status='measured';flow=state.inspectionHydrateVerification(flow,entry);
+assert.equal(state.inspectionActions(flow).sectionsReady,false);
+flow=state.inspectionTransition(flow,{type:'verify-measured',token:'build',requestId:'request-a'});
+entry.target.verification={token:'build',request_id:'request-b',status:'running'};
+flow=state.inspectionHydrateVerification(flow,entry);
+assert.equal(flow.sections.status,'stale');assert.equal(state.inspectionActions(flow).capture,false);
+assert.equal(flow.verification.requestId,'request-b');
+entry.target.verification.status='cancelled';entry.target.verification.error='Verification cancelled.';
+flow=state.inspectionHydrateVerification(flow,entry);
+assert.equal(state.inspectionActions(flow).cancel,false);assert.equal(state.inspectionActions(flow).verify,true);
+assert.equal(state.inspectionActions(flow).capture,false);
+""")
+
+
+def test_whole_model_verification_does_not_require_interface_metadata():
+    run_js("""
+let flow=state.inspectionInitial({part:'rail',token:'build',freshness:'current'});
+assert.equal(state.inspectionActions(flow).verify,false);
+flow=state.inspectionHydrateVerification(flow,{token:'build',target:{}});
+assert.equal(state.inspectionActions(flow).verify,true);assert.equal(state.inspectionActions(flow).inspect,false);
+assert.match(state.inspectionGuidance(flow),/Verify the whole model/);
+flow=state.inspectionHydrateVerification(flow,{token:'build',target:{stale:true}});
+assert.equal(state.inspectionActions(flow).verify,false);
+""")
+
+
 def test_module_is_shipped_and_served_offline(tmp_path):
     package = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert '"src/nurb/inspection-state.js"' in package

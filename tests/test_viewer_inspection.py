@@ -20,7 +20,7 @@ def js(functions, checks):
     source = f"""import * as THREE from {json.dumps(THREE)};
 import assert from 'node:assert/strict';
 import * as InspectionState from {json.dumps(INSPECTION_STATE)};
-const {{inspectionActions,inspectionGuidance,inspectionInitial,inspectionTransition,policyFromProvenance,
+const {{inspectionActions,inspectionGuidance,inspectionHydrateVerification,inspectionInitial,inspectionTransition,policyFromProvenance,
   sectionSeriesAdd,sectionSeriesInitial,sectionSeriesRemove,sectionSeriesSelect,sectionSeriesSelected,sectionSeriesUpdate}}=InspectionState;
 """
     for start, end in functions:
@@ -296,6 +296,7 @@ def test_precise_verification_rejects_late_build_results():
     js([("function verificationLanded(", "document.getElementById('verifycancel').onclick")], """
 const entry={token:'new',target:{verification:{status:'running'}}};
 const parts=new Map([['part',entry]]),current='part'; let renders=0,editorUpdates=0;
+let evidenceWorkflow=inspectionInitial({part:'part',token:'new'});
 const verificationShow=()=>renders++,featureEditorState=()=>editorUpdates++;
 const evidenceMove=()=>{},featureVerifiedResult=()=>null;
 verificationLanded({name:'part',token:'old',status:'measured',metrics:{part:{max:0}}});
@@ -303,6 +304,15 @@ assert.equal(entry.target.verification.status,'running'); assert.equal(renders,0
 verificationLanded({name:'part',token:'new',status:'unknown',error:'deadline'});
 assert.equal(entry.target.verification.status,'unknown'); assert.equal(renders,1);assert.equal(editorUpdates,1);
 assert.equal(entry.target.verification.metrics,undefined);
+const active={name:'part',token:'new',request_id:'active',status:'running'};
+entry.target.verification=active;
+verificationLanded({name:'part',token:'new',request_id:'rejected',status:'unknown',current_verification:active});
+assert.equal(entry.target.verification.request_id,'active');assert.equal(entry.target.verification.status,'running');
+assert.equal(evidenceWorkflow.verification.requestId,'active');assert.equal(inspectionActions(evidenceWorkflow).cancel,true);
+verificationLanded({name:'part',token:'new',request_id:'invalid-policy',status:'unknown',replaces_request_id:'active',error:'Invalid policy'});
+assert.equal(entry.target.verification.request_id,'invalid-policy');assert.equal(evidenceWorkflow.verification.status,'unknown');
+verificationLanded({name:'part',token:'new',request_id:'late-result',status:'measured',replaces_request_id:'active'});
+assert.equal(entry.target.verification.request_id,'invalid-policy');
 """)
 
 
@@ -320,6 +330,7 @@ symmetryDrawPlane(report,true);assert.ok(symmetryPlane);assert.ok(scene.children
 def test_precise_verification_shows_stale_without_reusing_old_metrics():
     js([("function verificationShow(", "function verificationLanded(")], """
 const current='part', verificationHistory=new Map([['part',{token:'old',status:'measured',metrics:{part:{sampled_max:0}}}]]);
+let evidenceWorkflow=inspectionInitial({part:'part',token:'new'});
 const fields={verifyresult:{replaceChildren(){this.cleared=true}},verifyrun:{},verifycancel:{},verifystatus:{}};
 const document={getElementById:id=>fields[id]};
 function evidenceRender(){fields.verifycancel.disabled=true;}

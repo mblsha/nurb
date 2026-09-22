@@ -838,7 +838,7 @@ class Server:
             if self.state.get(name) is entry and not stopped.is_set() and response.get("status") not in ("measured","unknown","cancelled","stale"):
                 response.update(status="running",phase=resources["phase"],resources=resources)
                 entry["target"]["verification"]=dict(response)
-                await self.reply(client,dict(response))
+                await self.send(dict(response))
         def progress(resources):
             loop.call_soon_threadsafe(lambda:asyncio.create_task(publish_phase(resources)))
         def analyze():
@@ -906,7 +906,7 @@ class Server:
                 current["target"]["verification"]=dict(response)
             self.verifications.pop(name,None)
             self.verification_controls.pop(name,None)
-        await self.reply(client,response)
+        await self.send(response)
 
     # ---------- target mesh ----------
 
@@ -1705,7 +1705,7 @@ class Server:
                     target = (self.state.get(name) or {}).get("target")
                     if target and self.state[name].get("token") == request["token"]:
                         target["verification"] = response
-                    await self.reply(client, response)
+                    await self.send(response)
             return
 
         if msg.get("type") == "target_verify":
@@ -1717,7 +1717,7 @@ class Server:
             request = {"request_id": secrets.token_hex(8), "token": entry.get("token"),
                        "status": "queued", "phase": "Preparing CAD snapshot"}
             try:
-                if name in self.verifications or len(self.verifications) >= 2:
+                if name in self.verification_controls or len(self.verification_controls) >= 2:
                     raise ValueError("Verification is already running; wait for it to finish before starting another.")
                 if entry.get("shape") is None or not target:
                     raise ValueError("Build a valid model and attach a reference before verifying.")
@@ -1733,16 +1733,22 @@ class Server:
                 previous=target.get("verification") or {}
                 if previous.get("status")=="measured": target["last_verification"]=previous
                 target["verification"] = {"type": "target_verification", "name": name, **request}
-                await self.reply(client, target["verification"])
                 stopped = threading.Event()
                 self.verification_controls[name] = (request, stopped)
+                # Register cancellation before any viewer can see the queued request.
+                await self.send(target["verification"])
                 self.verifications[name] = asyncio.create_task(self._verify_target(path, request, policy, client, stopped, deadline))
             except (ValueError, TypeError, KeyError) as exc:
                 response = {"type": "target_verification", "name": name, **request,
                             "status": "unknown", "phase": "Verification unavailable", "error": str(exc)}
-                if target and name not in self.verifications:
+                if target and name not in self.verification_controls:
+                    response["replaces_request_id"] = (target.get("verification") or {}).get("request_id")
                     target["verification"] = response
-                await self.reply(client, response)
+                    await self.send(response)
+                else:
+                    if target.get("verification"):
+                        response["current_verification"] = target["verification"]
+                    await self.reply(client, response)
             return
 
         if msg.get("type") in ("artifact_save", "inspection_sections", "inspection_list", "inspection_save", "inspection_restore", "inspection_prepare", "inspection_capture"):
