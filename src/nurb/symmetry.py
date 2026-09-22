@@ -92,7 +92,10 @@ def load_reference(path, units=None):
 
 
 def reference_identity(path, units):
-    digest = hashlib.sha256(Path(path).read_bytes())
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
     digest.update(str(units).encode())
     return digest.hexdigest()
 
@@ -109,11 +112,24 @@ def reference_snapshot(path, units=None):
     return reference, unit, digest.hexdigest()
 
 
+def _cone_normal(parameters, axis, basis, max_angle_deg):
+    """Map a bounded square onto the full requested angular cone."""
+    first, second = np.asarray(parameters, dtype=float)
+    disk = np.array([first * math.sqrt(max(0.0, 1.0 - second * second / 2)),
+                     second * math.sqrt(max(0.0, 1.0 - first * first / 2))])
+    radius = min(float(np.linalg.norm(disk)), 1.0)
+    if radius <= 1e-15:
+        return np.asarray(axis, dtype=float)
+    angle = math.radians(max_angle_deg) * radius
+    tangent = disk @ basis / radius
+    return np.asarray(axis) * math.cos(angle) + tangent * math.sin(angle)
+
+
 def identity(shape, reference_id, transform, configuration, revision, options, landmarks=None):
     from .feature_evidence import evidence_identity, shape_identity
     return evidence_identity(shape_identity(shape), reference_id, transform,
                              json.dumps(configuration, sort_keys=True),
-                             {"method": "symmetry-v2", "revision": revision, "options": asdict(options), "landmarks": landmarks or {}})
+                             {"method": "symmetry-v3", "revision": revision, "options": asdict(options), "landmarks": landmarks or {}})
 
 
 def fit_plane(reference, options):
@@ -159,8 +175,7 @@ def fit_plane(reference, options):
         raise ValueError("the reference has no measurable span")
 
     def unpack(parameters):
-        normal = axis + parameters[:2] @ basis
-        normal /= np.linalg.norm(normal)
+        normal = _cone_normal(parameters[:2], axis, basis, options.max_angle_deg)
         return normal, float(center @ normal + parameters[2])
 
     def residual(parameters):
@@ -170,8 +185,7 @@ def fit_plane(reference, options):
         delta = mirrored - target[indices]
         return np.einsum("ij,ij->i", delta, normals[indices]) if normals is not None else delta.reshape(-1)
 
-    slope = math.tan(math.radians(options.max_angle_deg)) / math.sqrt(2)
-    solved = least_squares(residual, np.zeros(3), bounds=([-slope, -slope, -span / 4], [slope, slope, span / 4]),
+    solved = least_squares(residual, np.zeros(3), bounds=([-1, -1, -span / 4], [1, 1, span / 4]),
                            loss="soft_l1", f_scale=max(options.reference_tolerance_mm / 2, 0.01), max_nfev=80,
                            diff_step=1e-4, ftol=1e-9, xtol=1e-9, gtol=1e-9)
     surface = compare._surface(reference) if is_mesh else None
@@ -188,8 +202,15 @@ def fit_plane(reference, options):
     if min(sides[side]["count"] for side in ("negative", "positive")) < 16:
         raise ValueError("the fitted plane lacks evidence on both sides; expand the selected region")
     warnings = []
-    if not solved.success or np.any(np.abs(solved.active_mask)):
-        warnings.append("The local fit reached its search limit; choose a closer approximate axis or expand the search angle.")
+    fitted_angle_deg = math.degrees(math.acos(float(np.clip(normal @ axis, -1, 1))))
+    angular_limit = fitted_angle_deg >= options.max_angle_deg * 0.98 or np.any(np.abs(solved.active_mask[:2]))
+    offset_limit = abs(float(solved.x[2])) >= span / 4 * 0.98 or bool(solved.active_mask[2])
+    if not solved.success:
+        warnings.append("The local fit did not converge; choose a closer approximate axis, adjust the fit region or expand the search angle.")
+    if angular_limit:
+        warnings.append("The local fit is at or within 2% of its angular search limit; choose a closer approximate axis or expand the search angle.")
+    if offset_limit:
+        warnings.append("The local fit is at or within 2% of its offset search limit; adjust the reference alignment or fit region.")
     if not is_mesh:
         spacing = tree.query(target[::max(1, len(target) // 2000)], k=2)[0][:, 1]
         warnings.append(f"Point-cloud distances include sampling gaps; median nearest-point spacing is {np.median(spacing):.4g} mm.")
@@ -201,13 +222,14 @@ def fit_plane(reference, options):
     return {"normal": normal.tolist(), "offset_mm": offset, "equation": "normal dot point = offset_mm",
             "frame": "part_mm", "approximate_axis": options.axis, "to_axis_transform": alignment.reshape(-1).tolist(),
             "fit_evaluations": solved.nfev, "reference_sides": sides,
+            "fitted_angle_deg": fitted_angle_deg, "max_angle_deg": options.max_angle_deg,
             "baseline": {"normal": baseline_normal.tolist(), "offset_mm": baseline_offset, "reference_sides": baseline_sides,
                          "statistics": baseline_stats, "definition": "chosen axis through reference bounding-box center, before fitting"},
             "after_fit": {"statistics": fitted_stats, "reference_sides": sides},
             "p95_improvement_mm": baseline_stats["p95_mm"] - fitted_stats["p95_mm"],
             "comparison_method": "same independent validation samples and same distance query before and after; negative improvement is retained",
             "reference_tolerance_mm": options.reference_tolerance_mm,
-            "reference_status": "within_sampled_threshold" if solved.success and not np.any(solved.active_mask) and all(sides[s]["p95_mm"] <= options.reference_tolerance_mm for s in ("negative", "positive")) else "review",
+            "reference_status": "within_sampled_threshold" if solved.success and not angular_limit and not offset_limit and all(sides[s]["p95_mm"] <= options.reference_tolerance_mm for s in ("negative", "positive")) else "review",
             "reference_method": "reflected holdout samples to triangle surface" if is_mesh else "reflected cloud points to cloud points",
             "warnings": warnings}
 

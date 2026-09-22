@@ -43,6 +43,28 @@ def test_mesh_fit_recovers_rotated_translated_plane_with_holdout_evidence():
     assert transform[:3, :3] @ result['normal'] == pytest.approx([1, 0, 0], abs=1e-6)
 
 
+@pytest.mark.parametrize('rotation_axis', ([0, 0, 1], [0, -2 ** -0.5, 2 ** -0.5]))
+def test_fit_search_covers_axis_and_diagonal_directions_near_requested_angle(rotation_axis):
+    mesh = reference_mesh()
+    matrix = trimesh.transformations.rotation_matrix(np.deg2rad(14), rotation_axis)
+    mesh.apply_transform(matrix)
+    result = symmetry.fit_plane(mesh, symmetry.Options(max_angle_deg=15))
+    assert result['normal'] == pytest.approx(matrix[:3, 0], abs=0.001)
+    assert result['fitted_angle_deg'] == pytest.approx(14, abs=0.02)
+    assert result['max_angle_deg'] == 15
+    assert result['reference_status'] == 'within_sampled_threshold'
+
+
+def test_fit_warns_when_solution_is_near_angular_search_limit():
+    mesh = reference_mesh()
+    matrix = trimesh.transformations.rotation_matrix(np.deg2rad(14.8), [0, 0, 1])
+    mesh.apply_transform(matrix)
+    result = symmetry.fit_plane(mesh, symmetry.Options(max_angle_deg=15))
+    assert result['normal'] == pytest.approx(matrix[:3, 0], abs=0.001)
+    assert result['reference_status'] == 'review'
+    assert any('angular search limit' in warning for warning in result['warnings'])
+
+
 def test_compressed_point_cloud_requires_units_and_keeps_original_bytes(tmp_path):
     points = np.random.default_rng(12).uniform([0.5, -4, -3], [5, 4, 3], (500, 3))
     points = np.vstack([points, points * [-1, 1, 1]]) + [2, 3, 4]
@@ -204,6 +226,121 @@ def test_reference_snapshot_geometry_and_hash_share_the_same_bytes(tmp_path, mon
     assert mesh.extents == pytest.approx([10,8,6])
     assert identity == digest
     assert symmetry.reference_identity(path,unit) != identity
+
+
+def test_independent_reference_replaced_after_snapshot_cannot_publish_current_evidence(tmp_path, monkeypatch):
+    from nurb import bounded, symmetry_service
+    part = project(tmp_path)
+    server = Server(tmp_path); server.queue = asyncio.Queue(); server.rebuild(part)
+    (tmp_path / 'scans').mkdir(); cloud = tmp_path / 'scans/cloud.ply'
+    cloud.write_bytes((tmp_path / 'scan.ply').read_bytes())
+    release = tmp_path / 'release-reference-snapshot'
+    original_snapshot = symmetry.reference_snapshot
+
+    def held_snapshot(path, units):
+        import time
+        result = original_snapshot(path, units)
+        bounded.phase('Reference snapshot captured for replacement test')
+        while not release.exists():
+            time.sleep(0.01)
+        return result
+
+    monkeypatch.setattr(symmetry, 'reference_snapshot', held_snapshot)
+    messages = []
+    captured = threading.Event()
+
+    async def capture(message):
+        messages.append(message)
+        if message.get('resources', {}).get('phase') == 'Reference snapshot captured for replacement test':
+            captured.set()
+
+    server.send = capture
+
+    async def scenario():
+        await server.command(json.dumps({'type': 'target_symmetry', 'name': 'thing', 'reference_file': 'scans/cloud.ply', 'units': 'mm'}))
+        job = server.symmetry_jobs['thing']
+        for _ in range(500):
+            if captured.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert captured.is_set()
+        trimesh.creation.box(extents=[20, 8, 6]).export(cloud)
+        symmetry_service.changed(server, {cloud.resolve()})
+        release.write_text('continue')
+        await job['task']
+
+    asyncio.run(scenario())
+    assert messages[-1]['status'] == 'stale'
+    assert 'cad' not in messages[-1]
+
+
+@pytest.mark.parametrize('change', ['cancel', 'reference', 'rebuild', 'parameters'])
+def test_final_reference_validation_is_cancellable_and_rechecks_live_inputs(tmp_path, monkeypatch, change):
+    import os
+    import time
+    from nurb import bounded, symmetry_service
+
+    part = project(tmp_path)
+    server = Server(tmp_path); server.queue = asyncio.Queue(); server.rebuild(part)
+    (tmp_path / 'scans').mkdir(); cloud = tmp_path / 'scans/cloud.ply'
+    cloud.write_bytes((tmp_path / 'scan.ply').read_bytes())
+    release = tmp_path / 'release-final-validation'
+    original_identity = symmetry.reference_identity
+
+    def held_identity(path, units):
+        result = original_identity(path, units)
+        bounded.phase('Final reference bytes read for lifecycle test')
+        while not release.exists():
+            time.sleep(0.01)
+        return result
+
+    monkeypatch.setattr(symmetry, 'reference_identity', held_identity)
+    messages = []
+    captured = threading.Event()
+
+    async def capture(message):
+        messages.append(message)
+        if message.get('resources', {}).get('phase') == 'Final reference bytes read for lifecycle test':
+            captured.set()
+
+    server.send = capture
+
+    async def scenario():
+        await server.command(json.dumps({'type': 'target_symmetry', 'name': 'thing',
+            'reference_file': 'scans/cloud.ply', 'units': 'mm', 'options': {'edge_step_mm': 2}}))
+        job = server.symmetry_jobs['thing']
+        for _ in range(1500):
+            if captured.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert captured.is_set()
+        if change == 'cancel':
+            await server.command(json.dumps({'type': 'target_symmetry_cancel', 'name': 'thing',
+                'token': job['token'], 'request_id': job['request_id']}))
+            # Keep the hash blocked: cancellation must reap it, not await its return.
+            await asyncio.wait_for(job['task'], 3)
+        else:
+            if change == 'reference':
+                trimesh.creation.box(extents=[20, 8, 6]).export(cloud)
+                symmetry_service.changed(server, {cloud.resolve()})
+            elif change == 'rebuild':
+                server.state['thing'] = {**server.state['thing'], 'token': 'replacement-build'}
+            else:
+                server.state['thing']['params'][0]['value'] = 12
+            release.write_text('continue')
+            await job['task']
+
+    asyncio.run(scenario())
+    result = messages[-1]
+    assert result['status'] == ('cancelled' if change == 'cancel' else 'stale')
+    assert 'cad' not in result
+    assert not server.symmetry_jobs
+    child = next(message['resources']['pid'] for message in messages
+                 if message.get('resources', {}).get('phase') == 'Final reference bytes read for lifecycle test')
+    with pytest.raises(ChildProcessError):
+        os.waitpid(child, os.WNOHANG)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
 
 
 def test_server_point_cloud_upload_runs_without_replacing_attached_reference(tmp_path):

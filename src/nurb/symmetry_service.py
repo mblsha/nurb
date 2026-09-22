@@ -108,7 +108,10 @@ async def _job(server, path, message, options, base, entry, stopped, client, dea
         if not message.get("cloud") and not message.get("reference_file"):
             if server._target_stamp(target["file"],target.get("units"))!=target.get("stamp"):
                 raise bounded.WorkError("The attached reference changed; wait for its refresh and run symmetry again.","stale")
+        source_set=set(server._build_sources(path,entry["shape"],snapshot))|{path,path.with_suffix('.md'),source}
+        source_files=bounded.file_identity(source_set)
         reference,unit,reference_id=symmetry.reference_snapshot(source,units)
+        bounded.verify_files(source_files)
         reference.apply_transform(compare._transform(transform))
         bounded.phase("Copying and identifying finished CAD")
         shape=copy.deepcopy(entry["shape"])
@@ -119,18 +122,44 @@ async def _job(server, path, message, options, base, entry, stopped, client, dea
         metadata={"source_revision":revision,"configuration":configuration,"reference_file":relative,"reference_units":unit,
                   "reference_kind":"independent" if message.get("cloud") or message.get("reference_file") else "attached","alignment":list(transform)}
         metadata["feature_records"] = [[r["name"], r["feature"]] for r in target.get("regions") or [] if "feature" in r]
-        source_files=bounded.file_identity(set(server._build_sources(path,entry["shape"],snapshot))|{path,path.with_suffix('.md'),source})
         return symmetry.prepare(shape,reference,options,contract,metadata,source_files,landmarks=locations)
 
     try:
         measured=await bounded.async_run(analyze,timeout_s=options.timeout_s,memory_limit_mb=options.memory_limit_mb,
                                          stop=stopped.is_set,progress=progress,deadline=deadline)
+        measured_source = (server.root / measured["reference_file"] if measured.get("reference_kind") == "independent"
+                           else Path(target["file"]) if Path(target["file"]).is_absolute() else server.root / target["file"])
+
+        def validate_reference():
+            bounded.phase("Validating current reference bytes")
+            stamp = bounded.file_stamp(measured_source)
+            try:
+                current_reference_id = symmetry.reference_identity(measured_source, measured["reference_units"])
+            except OSError as exc:
+                raise bounded.WorkError("The reference became unavailable during final validation.", "stale") from exc
+            if stamp != bounded.file_stamp(measured_source):
+                raise bounded.WorkError("The reference changed during final validation.", "stale")
+            return {"reference_id": current_reference_id, "stamp": stamp}
+
+        validated = await bounded.async_run(validate_reference, timeout_s=options.timeout_s,
+                                          memory_limit_mb=options.memory_limit_mb, stop=stopped.is_set,
+                                          progress=progress, deadline=deadline)
+        first_resources, last_resources = measured.get("resources", {}), validated["resources"]
+        measured["resources"] = {**last_resources,
+            "child_pids": first_resources.get("child_pids", []) + last_resources.get("child_pids", []),
+            "elapsed_s": first_resources.get("elapsed_s", 0) + last_resources.get("elapsed_s", 0),
+            "peak_rss_mb": max(first_resources.get("peak_rss_mb") or 0, last_resources.get("peak_rss_mb") or 0)}
+        # No await may separate these live checks from publishing the result.
+        if stopped.is_set():
+            raise bounded.WorkCancelled(resources=measured["resources"])
         current=server.state.get(name) or {}
         current_target=current.get("target") or {}
         current_configuration = {"name":current.get("variant") or "default","parameters":{p["name"]:p["value"] for p in current.get("params",[])}}
         if (current is not entry or current.get("token")!=base["token"] or server.overrides.get(name,{})!=overrides
                 or current_configuration != configuration
-                or any(current_target.get(k)!=target.get(k) for k in ("file","units","stamp","transform","content_id","regions"))):
+                or any(current_target.get(k)!=target.get(k) for k in ("file","units","stamp","transform","content_id","regions"))
+                or validated["stamp"] != bounded.file_stamp(measured_source)
+                or validated["reference_id"] != measured.get("identity", {}).get("reference")):
             result.update(status="stale",reason="stale",error="The model or reference changed during symmetry verification; run it again.")
         else: result.update(measured,phase="Complete")
     except asyncio.CancelledError:
