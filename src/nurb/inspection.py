@@ -176,7 +176,7 @@ def build_recipe_identity(source_revision, current_configuration, draft, current
 
 
 def identity(server, path, entry, state):
-    if 'shape' not in entry:
+    if entry.get('shape') is None or entry.get('error'):
         raise ValueError('the model must build successfully before saving or checking an inspection')
     target=entry.get('target') or {}
     reference=None

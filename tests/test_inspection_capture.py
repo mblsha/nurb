@@ -76,6 +76,15 @@ def test_build_recipe_tracks_source_configuration_draft_and_engine_inputs():
     assert inspection.build_recipe_identity('source-a',configuration,False,'engine-b')!=first
 
 
+def test_inspection_identity_requires_a_successful_build(tmp_path):
+    part,server,_=project(tmp_path)
+    entry=copy.deepcopy(server.state['thing'])
+    entry['shape']=None
+    entry['error']='model failed'
+    with pytest.raises(ValueError,match='must build successfully'):
+        inspection.identity(server,part,entry,state())
+
+
 def test_engine_revision_reuses_portable_source_bytes_and_runtime_versions(tmp_path):
     first=tmp_path/'first';second=tmp_path/'second'
     for root in (first,second):
