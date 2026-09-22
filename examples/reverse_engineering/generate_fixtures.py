@@ -5,6 +5,7 @@ import io
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import trimesh
 from build123d import Align, Box, Cylinder, Pos, Rot, export_stl
 
@@ -13,17 +14,47 @@ HERE = Path(__file__).parent
 SCANS = HERE / "scans"
 
 
-def stl_geometry(contents: bytes) -> tuple[tuple[tuple[float, float, float], ...], ...]:
-    """Return triangles without serialization order, winding, or signed zero."""
+def _stl_mesh(contents: bytes) -> trimesh.Trimesh:
     mesh = trimesh.load_mesh(io.BytesIO(contents), file_type="stl", process=False)
-    triangles = []
-    for triangle in mesh.triangles:
-        vertices = [
-            tuple(0.0 if abs(float(value)) < 5e-6 else round(float(value), 5) for value in vertex)
-            for vertex in triangle
-        ]
-        triangles.append(tuple(sorted(vertices)))
-    return tuple(sorted(triangles))
+    assert isinstance(mesh, trimesh.Trimesh)
+    return mesh
+
+
+def _surface_samples(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Sample vertices, edge midpoints, and centroids without depending on face diagonals."""
+    triangles = mesh.triangles
+    return np.concatenate(
+        (
+            mesh.vertices,
+            triangles.mean(axis=1),
+            (triangles[:, 0] + triangles[:, 1]) / 2.0,
+            (triangles[:, 1] + triangles[:, 2]) / 2.0,
+            (triangles[:, 2] + triangles[:, 0]) / 2.0,
+        )
+    )
+
+
+def _max_surface_distance(source: trimesh.Trimesh, target: trimesh.Trimesh) -> float:
+    maximum = 0.0
+    points = _surface_samples(source)
+    for start in range(0, len(points), 128):
+        _, distances, _ = trimesh.proximity.closest_point_naive(target, points[start : start + 128])
+        maximum = max(maximum, float(distances.max(initial=0.0)))
+    return maximum
+
+
+def stl_geometry_matches(first: bytes, second: bytes, *, tolerance_mm: float = 0.025) -> bool:
+    """Compare STL surfaces while allowing equivalent OCCT triangulations."""
+    first_mesh = _stl_mesh(first)
+    second_mesh = _stl_mesh(second)
+    if first_mesh.is_watertight != second_mesh.is_watertight:
+        return False
+    if not np.allclose(first_mesh.bounds, second_mesh.bounds, atol=tolerance_mm, rtol=0.0):
+        return False
+    return max(
+        _max_surface_distance(first_mesh, second_mesh),
+        _max_surface_distance(second_mesh, first_mesh),
+    ) <= tolerance_mm
 
 
 def disk_stl() -> bytes:
@@ -92,7 +123,7 @@ def main() -> int:
     args = parser.parse_args()
     meshes = generated()
     if args.check:
-        changed = [name for name, data in meshes.items() if stl_geometry((SCANS / name).read_bytes()) != stl_geometry(data)]
+        changed = [name for name, data in meshes.items() if not stl_geometry_matches((SCANS / name).read_bytes(), data)]
         if changed:
             parser.error(f"regenerate changed fixture(s): {', '.join(changed)}")
         print(f"checked {len(meshes)} fixtures")
