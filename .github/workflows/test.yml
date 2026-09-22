@@ -47,7 +47,7 @@ jobs:
         run: uv run --project ../.. nurb check --strict
 
   desktop:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -58,9 +58,6 @@ jobs:
           cache-dependency-path: desktop/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Tauri build libraries
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
 
       - run: npm ci
         working-directory: desktop
