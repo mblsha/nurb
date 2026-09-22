@@ -10,13 +10,19 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VIEWER = (ROOT / "src/nurb/viewer.html").read_text()
 THREE = (ROOT / "src/nurb/vendor/three/build/three.module.min.js").as_uri()
+INSPECTION_STATE = (ROOT / "src/nurb/inspection-state.js").as_uri()
 
 
 def js(functions, checks):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node.js is needed for viewer geometry checks")
-    source = f"import * as THREE from {json.dumps(THREE)};\nimport assert from 'node:assert/strict';\n"
+    source = f"""import * as THREE from {json.dumps(THREE)};
+import assert from 'node:assert/strict';
+import * as InspectionState from {json.dumps(INSPECTION_STATE)};
+const {{inspectionActions,inspectionGuidance,inspectionInitial,inspectionTransition,policyFromProvenance,
+  sectionSeriesAdd,sectionSeriesInitial,sectionSeriesRemove,sectionSeriesSelect,sectionSeriesSelected,sectionSeriesUpdate}}=InspectionState;
+"""
     for start, end in functions:
         source += start + VIEWER.split(start, 1)[1].split(end, 1)[0] + "\n"
     result = subprocess.run([node, "--input-type=module", "-"], input=source + checks,
@@ -253,9 +259,11 @@ function featureExportState() {} function featureVerifiedResult(){return null;}
 const fields={freshness:{},inspect:{},verified:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{}};
 const featureField=id=>fields[id], current='part';
 const selectedFeatureRegion=()=>({feature:{id:'rim'}});
+let evidenceWorkflow=inspectionInitial({part:'part',token:'old-build',interfaceId:'rim'});function evidenceRender(){}
 let featureInspection={name:'part',token:'old-build'}, featureDirty=false;
 featureEditorState({token:'new-build',target:{feature_evidence:[{id:'rim',status:'stale'}]}});
 assert.equal(featureInspection,null);
+assert.equal(evidenceWorkflow.sections.status,'stale');
 assert.equal(fields.plot.hidden,true);
 assert.equal(fields.review.disabled,true);
 assert.match(fields.freshness.textContent,/stale/);
@@ -267,7 +275,7 @@ def test_feature_rename_preserves_identity_and_other_saved_series():
     js([("function featureSectionValue(", "function featureEditorLoad(")], """
 const previous={id:'stable-rim',feature_size_mm:.3,sections:[{name:'first'},{name:'second'}],review:{identity:{token:'old'}}};
 const selectedFeatureRegion=()=>({feature:previous});
-let featureSectionDrafts=structuredClone(previous.sections),featureSectionIndex=0;
+let featureSeries=sectionSeriesInitial(previous.sections);
 const fields={enabled:{checked:true},point:{value:''},center:{value:'-3 0 0'},symmetrygroup:{value:'cushion holes'},size:{value:'0.3'},uncertainty:{value:''},sectionenabled:{checked:true},
  offsets:{value:'-1 0 1'},sectionname:{value:'Updated station'},origin:{value:'0 0 0'},normal:{value:'0 0 1'},
  x:{value:'1 0 0'},tolerance:{value:'0'},expected:{value:'small T'}};
@@ -284,25 +292,12 @@ assert.equal(result.feature.review.identity.token,'old');
 """)
 
 
-def test_multiple_section_series_can_be_selected_and_edited_independently():
-    js([("function featureSectionValue(", "function featureRegionValues(")], """
-function Option(text,value){this.text=text;this.value=value;}
-const fields={sectionchoice:{replaceChildren(...items){this.options=items;}},sectionremove:{},sectionenabled:{checked:true},extras:{},
- sectionname:{value:''},origin:{value:''},normal:{value:''},x:{value:''},offsets:{value:''},tolerance:{value:''},expected:{value:''}};
-const featureField=id=>fields[id],inspectionVector=text=>text.split(' ').map(Number);
-let featureSectionDrafts=[{name:'front',origin_mm:[0,0,0],normal:[1,0,0],x_direction:[0,1,0],offsets_mm:[0],tolerance_mm:0,expected:''},
- {name:'side',origin_mm:[1,2,3],normal:[0,1,0],x_direction:[1,0,0],offsets_mm:[-1,1],tolerance_mm:.01,expected:'T'}],featureSectionIndex=0;
-featureSectionLoad(0);fields.sectionname.value='front edited';featureSectionStore();featureSectionLoad(1);
-assert.equal(featureSectionDrafts[0].name,'front edited');assert.equal(fields.sectionname.value,'side');
-assert.equal(fields.normal.value,'0 1 0');assert.equal(fields.offsets.value,'-1 1');assert.equal(fields.sectionchoice.options.length,2);
-""")
-
-
 def test_precise_verification_rejects_late_build_results():
     js([("function verificationLanded(", "document.getElementById('verifycancel').onclick")], """
 const entry={token:'new',target:{verification:{status:'running'}}};
 const parts=new Map([['part',entry]]),current='part'; let renders=0,editorUpdates=0;
 const verificationShow=()=>renders++,featureEditorState=()=>editorUpdates++;
+const evidenceMove=()=>{},featureVerifiedResult=()=>null;
 verificationLanded({name:'part',token:'old',status:'measured',metrics:{part:{max:0}}});
 assert.equal(entry.target.verification.status,'running'); assert.equal(renders,0);
 verificationLanded({name:'part',token:'new',status:'unknown',error:'deadline'});
@@ -327,6 +322,7 @@ def test_precise_verification_shows_stale_without_reusing_old_metrics():
 const current='part', verificationHistory=new Map([['part',{token:'old',status:'measured',metrics:{part:{sampled_max:0}}}]]);
 const fields={verifyresult:{replaceChildren(){this.cleared=true}},verifyrun:{},verifycancel:{},verifystatus:{}};
 const document={getElementById:id=>fields[id]};
+function evidenceRender(){fields.verifycancel.disabled=true;}
 verificationShow({name:'part',token:'new',target:{}});
 assert.equal(fields.verifyresult.cleared,true);
 assert.match(fields.verifystatus.textContent,/stale/);
@@ -357,7 +353,9 @@ def test_feature_scale_survives_editor_load_save_and_can_be_cleared_explicitly()
 const previous={id:'stable-rim',feature_size_mm:.3,role:'small headset lip'};
 const selectedFeatureRegion=()=>({feature:previous}), current='part', parts=new Map();
 const Option=(text,value)=>({text,value}),fields=new Map(), featureField=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,setAttribute(){},replaceChildren(){}});return fields.get(id);};
-let featureDirty=false,featureInspection=null,featureSectionDrafts=[],featureSectionIndex=0;
+const document={getElementById:id=>id==='evidenceinterface'?{options:[],value:''}:null};
+const inspectionField=()=>({value:'preview'});let evidenceWorkflow=inspectionInitial();function evidenceRender(){}
+let featureDirty=false,featureInspection=null,featureSeries=sectionSeriesInitial();
 function featureEditorState(){} function inspectionVector(text){return text.split(' ').map(Number);}
 featureEditorLoad({feature:previous});
 assert.equal(featureField('size').value,.3);
@@ -398,6 +396,7 @@ const fields={freshness:{},inspect:{},verified:{},review:{},plot:{setAttribute()
 const featureField=id=>fields[id], current='part';
 function featureExportState(){} function featureVerifiedResult(){return null;}
 const selectedFeatureRegion=()=>({feature:{id:'rim',feature_size_mm:.1}});
+let evidenceWorkflow=inspectionInitial({part:'part',token:'same-build',interfaceId:'rim'});function evidenceRender(){}
 let featureInspection={name:'part',token:'same-build',result:{identity:{token:'old-scale'}}},featureDirty=false;
 featureEditorState({token:'same-build',target:{feature_evidence:[{id:'rim',status:'stale',identity:{token:'new-scale'}}]}});
 assert.equal(featureInspection,null);assert.equal(fields.review.disabled,true);
@@ -414,6 +413,7 @@ const current='part',entry={token:'build',target:{feature_evidence:[{id:'rim',st
 const fields={freshness:{},inspect:{},verified:{},review:{},plot:{setAttribute(){this.hidden=true}},station:{},status:{},json:{},svg:{}};
 const featureField=id=>fields[id],selectedFeatureRegion=()=>({feature:{id:'rim',feature_size_mm:.3}});
 function featureVerifiedResult(){return null;}
+let evidenceWorkflow=inspectionInitial({part:'part',token:'build',interfaceId:'rim'});function evidenceRender(){}
 let featureDirty=false,featureInspection={name:'part',token:'build',result:{id:'rim',identity:{token:'known'},cad:[{}]}},listener;
 const document={getElementById:()=>({addEventListener:(event,callback)=>{listener=callback;}})};
 let symmetryRefreshes=0;function symmetryPanel(){symmetryRefreshes++;}
@@ -448,7 +448,9 @@ def test_explicit_center_editor_roundtrip_and_clear_do_not_restore_a_hidden_alia
 const previous={id:'center',point_mm:[-3,0,0],symmetry_group:'cushion holes'};
 const selectedFeatureRegion=()=>({feature:previous}),current='part',parts=new Map();
 const Option=(text,value)=>({text,value}),fields=new Map(),featureField=id=>{if(!fields.has(id))fields.set(id,{value:'',checked:false,setAttribute(){},replaceChildren(){}});return fields.get(id);};
-let featureDirty=false,featureInspection=null,featureSectionDrafts=[],featureSectionIndex=0;
+const document={getElementById:id=>id==='evidenceinterface'?{options:[],value:''}:null};
+const inspectionField=()=>({value:'preview'});let evidenceWorkflow=inspectionInitial();function evidenceRender(){}
+let featureDirty=false,featureInspection=null,featureSeries=sectionSeriesInitial();
 function featureEditorState(){}function inspectionVector(text){return text.split(' ').map(Number);}
 featureEditorLoad({feature:previous});
 assert.equal(featureField('center').value,'-3 0 0');assert.equal(featureField('symmetrygroup').value,'cushion holes');

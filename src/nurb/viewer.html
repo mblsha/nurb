@@ -199,10 +199,15 @@
   #cut button.on { color: var(--accent); background: rgba(110,231,168,.1); }
   #cut input { width: 110px; margin: 0 6px 0 4px; }
   #comparepanel { width: 390px; max-width: calc(100vw - 268px); max-height: calc(100vh - 150px); overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(29,32,39,.96); box-shadow: 0 4px 16px rgba(0,0,0,.25); font-size: 11px; }
-  #savedinspections label { display:block; margin:7px 0; }
-  #savedinspections input, #savedinspections select { width:100%; box-sizing:border-box; color:var(--text); background:var(--bg); border:1px solid var(--line); padding:4px; font:inherit; }
-  #savedinspections p, #inspectionstatus { margin:8px 0; line-height:1.45; color:var(--dim); overflow-wrap:anywhere; }
-  #savedinspections summary { cursor:pointer; padding:6px 0; }
+  #inspectionworkflow { border:1px solid #48505d; border-radius:8px; padding:9px; margin-bottom:10px; background:rgba(18,21,26,.6); }
+  #inspectionworkflow h3 { font-size:12px; margin:0 0 4px; }
+  #inspectionworkflow label { display:block; margin:6px 0; }
+  #inspectionworkflow input, #inspectionworkflow select { width:100%; box-sizing:border-box; color:var(--text); background:var(--bg); border:1px solid var(--line); padding:4px; font:inherit; }
+  #inspectionworkflow p, #inspectionstatus, #featurestatus, #verifystatus { margin:6px 0; line-height:1.4; color:var(--dim); overflow-wrap:anywhere; }
+  #evidenceguidance { color:var(--text) !important; }
+  .evidencestep { border-top:1px solid var(--line); padding:8px 0 3px; }
+  .evidencestep > b { display:block; color:var(--accent); margin-bottom:4px; }
+  #featureplot { width:100%; background:#16181d; border:1px solid #454a54; margin-top:6px; }
   #inspectiondownload a { color:var(--accent); }
   #symmetrypanel label { display:block; margin:7px 0; }
   #symmetrypanel input[type=number], #symmetrypanel select { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:3px 5px; }
@@ -731,18 +736,25 @@
     <div id="print"></div>
     <section id="comparepanel" aria-label="Compare CAD with reference" hidden>
       <h2>Compare <button id="compareclose" aria-label="close comparison panel">close</button></h2>
-      <details id="savedinspections"><summary>Saved inspections and capture</summary>
-        <p>Keep a camera, configuration, component visibility, comparison mode and local sections together. Capture an image, report and evidence files in one bundle.</p>
-        <label>Saved setup <select id="inspectionchoice"><option value="">Current view</option></select></label>
-        <button id="inspectionrefresh">Refresh list</button> <button id="inspectionrestore" disabled>Restore setup</button>
-        <label>Inspection name <input id="inspectionlabel" maxlength="120" placeholder="Headset lip, narrow rim"></label>
-        <label>Local section evidence <select id="inspectionsectionquality"><option value="preview">Preview display mesh</option><option value="verified">Verified bounded mesh</option></select></label>
-        <p>Verified setups require a matching completed verification and preserve its policy. Captures never substitute preview contours.</p>
-        <button id="inspectionsave">Save current setup</button> <button id="inspectioncapture">Capture evidence bundle</button>
-        <div id="inspectionstatus" role="status"></div><div id="inspectiondownload"></div>
-        <p>Restoring a setup changes the displayed parameters and preview alignment. It does not rewrite the model or card. Changed inputs are labeled stale; saving a new setup records a new baseline.</p>
-      </details>
-      <details id="symmetrypanel"><summary>Symmetry evidence</summary>
+      <section id="inspectionworkflow" aria-label="Inspection evidence workflow">
+        <h3>Inspection evidence</h3>
+        <p id="evidenceguidance" role="status">1. Select a named interface or restore a saved setup.</p>
+        <div class="evidencestep"><b>1 · Select</b><label>Interface <select id="evidenceinterface"><option value="">Choose a named interface</option></select></label>
+          <label>Saved setup <select id="inspectionchoice"><option value="">Current view</option></select></label>
+          <button id="inspectionrefresh">Refresh</button> <button id="inspectionrestore" disabled>Restore</button></div>
+        <div class="evidencestep"><b>2 · Inspect sections</b><button id="featureinspect" type="button">Inspect preview</button>
+          <select id="featurestation" aria-label="Local section station" hidden></select>
+          <svg id="featureplot" viewBox="0 0 360 240" role="img" aria-label="Aligned CAD and reference local section" hidden></svg>
+          <div id="featurestatus" role="status"></div><p id="featureprovenance">Preview uses the display mesh. Verify before relying on small interface details.</p></div>
+        <div class="evidencestep"><b>3 · Verify</b><button id="verifyrun">Verify precisely</button><button id="verifycancel" disabled>Cancel</button>
+          <button id="featureverified" type="button" disabled>Show verified sections</button><div id="verifystatus" role="status"></div><div id="verifyresult"></div></div>
+        <div class="evidencestep"><b>4 · Save or capture</b><label>Name <input id="inspectionlabel" maxlength="120" placeholder="Headset lip, narrow rim"></label>
+          <label>Evidence <select id="inspectionsectionquality"><option value="preview">Preview display mesh</option><option value="verified">Verified bounded mesh</option></select></label>
+          <button id="inspectionsave">Save setup</button> <button id="inspectioncapture">Capture bundle</button>
+          <button id="featurejson" type="button" disabled>Export section JSON</button><button id="featuresvg" type="button" disabled>Export station SVG</button>
+          <div id="inspectionstatus" role="status"></div><div id="inspectiondownload"></div></div>
+      </section>
+      <details id="symmetrypanel"><summary>Advanced: symmetry evidence</summary>
         <p>Fit the reference plane, then check finished faces, hole edges, authored feature centers and periodic seams separately. Add known centers in Named inspection regions. The reference coordinates and bytes stay unchanged.</p>
         <div id="symmetrysource"></div><button id="symmetrycloud">Choose point cloud…</button> <button id="symmetryattached">Use attached reference</button>
         <label>Point cloud source units <select id="symmetryunits"><option>mm</option><option>cm</option><option>m</option><option>in</option></select></label>
@@ -779,6 +791,7 @@
           <div id="importselection" hidden><button id="importapply">Save selected components</button><button id="importcancel">Cancel preview</button></div>
           <p id="importstatus" role="status"></p>
         </details>
+        <details id="compareadvanced"><summary>Advanced comparison and verification settings</summary>
         <div id="comparealignment"><button id="compareoriginal" title="preview the reference in its original coordinate frame">Preview original</button><button id="comparecenter" title="preview matching bounding-box centers without rotating or scaling the reference">Preview centered</button><button id="compareapply" title="save this previewed rigid transform in the part card">Apply alignment</button><button id="comparecancel">Cancel preview</button></div>
         <div id="comparetransform">
           <label>X mm<input data-transform="tx" type="number" step="0.1"></label><label>Y mm<input data-transform="ty" type="number" step="0.1"></label><label>Z mm<input data-transform="tz" type="number" step="0.1"></label>
@@ -791,16 +804,15 @@
           <label>tolerance <input id="comparetolerance" type="number" min="0.001" step="0.001" value="0.1" aria-label="comparison tolerance in millimetres">mm</label>
         </div>
         <div id="comparestate" role="status"></div>
-        <details id="preciseverification"><summary>Verify with a finer CAD mesh</summary>
+        <details id="preciseverification"><summary>Verification policy and resource limits</summary>
           <p>The live comparison uses the display mesh. Request a separate, bounded verification for small mating features. Deflection is a meshing request, not a certified error bound.</p>
           <label>Requested mesh deflection (mm) <input id="verifyaccuracy" type="number" min="0.0001" step="0.001" placeholder="automatic from tolerance"></label>
           <label>Smallest important feature (mm) <input id="verifyfeature" type="number" min="0.001" step="0.01" placeholder="optional"></label>
           <label>Time budget (seconds) <input id="verifyseconds" type="number" min="1" max="120" value="30"></label>
           <label>Child RSS limit (MiB) <input id="verifymemory" type="number" min="32" max="32768" step="128" value="2048"></label>
           <label>Triangle budget <input id="verifytriangles" type="number" min="1000" max="5000000" step="1000" value="1000000"></label>
-          <button id="verifyrun">Run precise verification</button><button id="verifycancel" disabled>Cancel</button>
           <p>The deadline covers snapshot preparation and all measurements. macOS/Linux monitor child RSS every 50 ms; short allocation overshoot is possible. Triangle limits only bound accepted output.</p>
-          <div id="verifystatus" role="status"></div><div id="verifyresult"></div>
+        </details>
         </details>
         <div id="comparemetricscope"><b id="comparemetricstitle">Whole model</b> <button id="comparewhole" hidden>Whole model</button></div>
         <table aria-label="Estimated sampled surface distances">
@@ -813,14 +825,14 @@
         <div id="compareworst"></div><div id="inspectionregions" aria-label="Named inspection regions"></div>
 
         <details id="referenceinspection"><summary>Reference measurements</summary><div id="referenceinspectionresult">Use Inspect reference to measure faces, bores and sections.</div></details>
-        <details id="datumalignment"><summary>Align from measurements</summary>
+        <details id="datumalignment"><summary>Advanced: align from measurements</summary>
           <p>Coordinates are in the shared part frame, in mm. Directions are X Y Z vectors.</p>
           <label>Constraint <select id="datumkind"><option value="plane">Plane</option><option value="axis">Axis</option><option value="landmarks">Landmarks</option></select></label>
           <div id="datumvectors"><label>Reference origin <input id="datumorigin" value="0 0 0"></label><label>Reference normal / direction <input id="datumdirection" value="0 0 1"></label><label>CAD origin <input id="datumtargetorigin" value="0 0 0"></label><label>CAD normal / direction <input id="datumtargetdirection" value="0 0 1"></label></div>
           <div id="datumlandmarks" hidden><label>Reference points, one X Y Z per line<textarea id="datumsourcepoints" rows="3"></textarea></label><label>Matching CAD points<textarea id="datumtargetpoints" rows="3"></textarea></label></div>
           <button id="datumpreview">Preview</button> <button id="datumapply" disabled>Apply alignment</button><div id="datumstatus" role="status"></div>
         </details>
-        <details id="regioneditor"><summary>Named inspection regions</summary><p>Box corners use the shared part frame, in mm.</p>
+        <details id="regioneditor"><summary>Advanced: edit interfaces and section frames</summary><p>Box corners use the shared part frame, in mm.</p>
           <label>Region <select id="regionexisting"><option value="">New region</option></select></label>
           <label>Name <input id="regionname" placeholder="camera seat"></label>
           <label>Selection <select id="regionkind"><option value="box">Box</option><option value="component">Component</option></select></label>
@@ -856,16 +868,9 @@
             <label>Contour simplification (mm, 0 keeps all points) <input id="featuretolerance" type="number" min="0" step="0.01" value="0"></label>
             <label>Expected profile <input id="featureexpected" placeholder="small inverted T, including both shoulders"></label>
             <p id="featureextras"></p><div id="featurefreshness" role="status"></div>
-            <button id="featureinspect" type="button">Preview saved feature sections</button>
-            <button id="featureverified" type="button" disabled>Show verified sections</button>
             <button id="featurereview" type="button" disabled>Record this inspection</button>
             <label>Inspection note <input id="featurereviewnote" placeholder="what these cuts establish or leave uncertain"></label>
-            <div id="featurestatus" role="status"></div>
-            <button id="featurejson" type="button" disabled>Export section JSON</button>
-            <button id="featuresvg" type="button" disabled>Export station SVG</button>
-            <p id="featureprovenance">Preview exports use the display mesh, whose accuracy in mm is unknown. Run precise verification to inspect and export bounded verification contours.</p>
-            <select id="featurestation" aria-label="Local section station" hidden></select>
-            <svg id="featureplot" viewBox="0 0 360 240" role="img" aria-label="Aligned CAD and reference local section" hidden style="width:100%;background:#16181d;border:1px solid #454a54"></svg>
+            <p>Preview and verified section actions are in the Inspection evidence flow above.</p>
           </details>
           <button id="regionsave">Save region</button> <button id="regionremove" disabled>Remove region</button><div id="regionstatus" role="status"></div>
         </details>
@@ -917,6 +922,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { SpaceMouseControls } from '/spacemouse.js';
+import { inspectionActions, inspectionGuidance, inspectionInitial, inspectionTransition, policyFromProvenance,
+  sectionSeriesAdd, sectionSeriesInitial, sectionSeriesRemove, sectionSeriesSelect, sectionSeriesSelected, sectionSeriesUpdate } from '/inspection-state.js';
 
 const parts = new Map();
 // Constructions the project's parts repeat, from the server's duplication scan.
@@ -1862,6 +1869,10 @@ document.getElementById('regionexisting').onchange = event => {
   document.getElementById('regionremove').disabled = regionWrites.has(current) || !region;
   featureEditorLoad(region);
 };
+document.getElementById('evidenceinterface').onchange = event => {
+  const existing=document.getElementById('regionexisting'); existing.value=event.target.value; existing.dispatchEvent(new Event('change'));
+  inspectionSelectRegion(event.target.value || null,true); comparePanel(parts.get(current));
+};
 function regionEditor(entry) {
   featureEditorState(entry);
   verificationShow(entry);
@@ -1884,6 +1895,14 @@ function regionEditor(entry) {
     existing.value = selected; existing.dataset.signature = signature;
     document.getElementById('regionstatus').textContent = '';
   }
+  const interfaces=regions.filter(region=>region.feature), interfaceSelect=document.getElementById('evidenceinterface');
+  const interfaceKey=JSON.stringify(interfaces.map(region=>[region.name,region.feature.id]));
+  if (interfaceSelect.dataset.signature!==interfaceKey) {
+    const chosen=selectedFeatureRegion()?.name || interfaceSelect.value;
+    interfaceSelect.replaceChildren(new Option('Choose a named interface',''),...interfaces.map(region=>new Option(region.name,region.name)));
+    if (interfaces.some(region=>region.name===chosen)) interfaceSelect.value=chosen;
+    interfaceSelect.dataset.signature=interfaceKey;
+  }
   const components = document.getElementById('regioncomponent'), before = components.value;
   components.replaceChildren(...[...inspectionGroups.values(), ...modelNodes().map(componentInfo)].map(info => new Option(info.label,info.id)));
   if ([...components.options].some(option => option.value === before)) components.value = before;
@@ -1891,8 +1910,23 @@ function regionEditor(entry) {
 }
 
 // ---- functional feature evidence and local station sections ----
-let featureInspection = null, featureDirty = false, featureSectionIndex = 0, featureSectionDrafts = [];
+let featureInspection = null, featureDirty = false, featureSeries = sectionSeriesInitial();
+let evidenceWorkflow = inspectionInitial();
 const featureField = name => document.getElementById('feature'+name);
+function evidenceMove(event) {
+  evidenceWorkflow=inspectionTransition(evidenceWorkflow,event); evidenceRender(); return evidenceWorkflow;
+}
+function evidenceRender() {
+  const guidance=document.getElementById('evidenceguidance'); if (!guidance) return;
+  const actions=inspectionActions(evidenceWorkflow);
+  guidance.textContent=inspectionGuidance(evidenceWorkflow);
+  featureField('inspect').disabled=!actions.inspect;
+  document.getElementById('verifyrun').disabled=!actions.verify;
+  document.getElementById('verifycancel').disabled=!actions.cancel;
+  inspectionField('save').disabled=!actions.save || inspectionBusy;
+  inspectionField('capture').disabled=!actions.capture || inspectionBusy;
+  document.getElementById('inspectionworkflow').dataset.phase=evidenceWorkflow.capture.status==='capturing'?'capture':evidenceWorkflow.verification.status;
+}
 function selectedFeatureRegion() {
   return (parts.get(current)?.target?.regions || []).find(region => region.name === document.getElementById('regionexisting').value);
 }
@@ -1903,17 +1937,17 @@ function featureSectionValue() {
     offsets_mm:offsets,tolerance_mm:Number(featureField('tolerance').value),expected:featureField('expected').value.trim()};
 }
 function featureSectionStore() {
-  if (featureField('sectionenabled').checked && featureSectionDrafts.length) featureSectionDrafts[featureSectionIndex]=featureSectionValue();
+  if (featureField('sectionenabled').checked) featureSeries=sectionSeriesUpdate(featureSeries,featureSectionValue());
 }
 function featureSectionLoad(index) {
-  featureSectionIndex=Math.max(0,Math.min(index,featureSectionDrafts.length-1));
-  const section=featureSectionDrafts[featureSectionIndex];
-  featureField('sectionchoice').replaceChildren(...featureSectionDrafts.map((item,i)=>new Option(item.name || `Series ${i+1}`,String(i))));
-  featureField('sectionchoice').value=String(featureSectionIndex); featureField('sectionchoice').disabled=!section;
+  featureSeries=sectionSeriesSelect(featureSeries,index);
+  const section=sectionSeriesSelected(featureSeries);
+  featureField('sectionchoice').replaceChildren(...featureSeries.items.map((item,i)=>new Option(item.name || `Series ${i+1}`,String(i))));
+  featureField('sectionchoice').value=String(featureSeries.index); featureField('sectionchoice').disabled=!section;
   featureField('sectionremove').disabled=!section;
   for (const [id,key,fallback] of [['origin','origin_mm',[0,0,0]],['normal','normal',[0,0,1]],['x','x_direction',[1,0,0]],['offsets','offsets_mm',[0]]]) featureField(id).value=(section?.[key] || fallback).join(' ');
   featureField('sectionname').value=section?.name || 'Mating profile'; featureField('tolerance').value=section?.tolerance_mm ?? 0; featureField('expected').value=section?.expected || '';
-  featureField('extras').textContent=featureSectionDrafts.length ? `${featureSectionIndex+1} of ${featureSectionDrafts.length} independently oriented section series.` : 'Add a section series to inspect this interface.';
+  featureField('extras').textContent=featureSeries.items.length ? `${featureSeries.index+1} of ${featureSeries.items.length} independently oriented section series.` : 'Add a section series to inspect this interface.';
 }
 function featureRegionValues(region) {
   if (!featureField('enabled').checked) return region;
@@ -1932,14 +1966,16 @@ function featureRegionValues(region) {
   const uncertainty = featureField('uncertainty').value.trim();
   if (uncertainty) feature.uncertainty_mm = Number(uncertainty); else delete feature.uncertainty_mm;
   if (featureField('sectionenabled').checked) {
-    if (!featureSectionDrafts.length) featureSectionDrafts=[featureSectionValue()];
-    featureSectionStore(); feature.sections=structuredClone(featureSectionDrafts);
+    featureSectionStore(); feature.sections=structuredClone(featureSeries.items);
   } else feature.sections = [];
   return {...region,feature};
 }
 function featureEditorLoad(region) {
   featureDirty = false;
   const feature = region?.feature;
+  const interfaceSelect=document.getElementById('evidenceinterface');
+  if (interfaceSelect && [...interfaceSelect.options].some(option=>option.value===region?.name)) interfaceSelect.value=region.name;
+  else if (interfaceSelect) interfaceSelect.value='';
   featureField('enabled').checked = !!feature; featureField('id').value = feature?.id || '';
   for (const key of ['role','configuration','orientation','notes','symmetry_group']) featureField(key.replace('_','')).value = feature?.[key] || '';
   for (const key of ['required','excluded','links']) featureField(key).value = (feature?.[key] || []).join('\n');
@@ -1947,8 +1983,11 @@ function featureEditorLoad(region) {
   featureField('center').value = (feature?.center_mm || feature?.point_mm)?.join(' ') || '';
   featureField('size').value = feature?.feature_size_mm ?? feature?.feature_scale_mm ?? '';
   featureField('uncertainty').value = feature?.uncertainty_mm ?? '';
-  featureSectionDrafts=structuredClone(feature?.sections || []); featureSectionIndex=0;
-  featureField('sectionenabled').checked = !!featureSectionDrafts.length; featureSectionLoad(0);
+  featureSeries=sectionSeriesInitial(feature?.sections || []);
+  featureField('sectionenabled').checked = !!featureSeries.items.length; featureSectionLoad(0);
+  evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'select',part:current,token:parts.get(current)?.token,
+    interfaceId:feature?.id || null,source:inspectionField('sectionquality')?.value || evidenceWorkflow.source,
+    freshness:parts.get(current)?.target?.stale?'stale':'current'});
   featureInspection = null; featureField('review').disabled = true; featureField('plot').setAttribute('hidden',''); featureField('station').hidden = true;
   featureField('status').textContent = ''; featureEditorState(parts.get(current));
 }
@@ -1964,7 +2003,11 @@ function featureEditorState(entry) {
     : record?.status === 'current' ? 'Recorded inspection matches the current geometry, reference, alignment and feature contract. This is evidence, not a fit certificate.'
     : record?.status === 'stale' ? 'Evidence stale: geometry, reference, alignment or feature contract changed. Inspect again.'
     : 'No inspection recorded for this feature.';
-  featureField('inspect').disabled = featureDirty || !selected?.feature || !!entry?.target?.stale;
+  if (evidenceWorkflow.token && entry?.token && evidenceWorkflow.token!==entry.token)
+    evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'rebuild',token:entry.token,freshness:entry.target?.stale?'stale':'current'});
+  evidenceWorkflow={...evidenceWorkflow,part:current,token:entry?.token,interfaceId:selected?.feature?.id || null,
+    freshness:entry?.target?.stale?'stale':evidenceWorkflow.freshness,dirty:featureDirty};
+  evidenceRender();
   featureField('verified').disabled = featureDirty || !featureVerifiedResult(entry,selected?.feature?.id);
   if (featureInspection && (featureInspection.name !== current || featureInspection.token !== entry?.token || entry?.target?.stale
       || (record?.identity && record.identity.token !== featureInspection.result?.identity?.token)
@@ -1995,7 +2038,8 @@ function featureInspectionLanded(message) {
   featureInspection = message;
   const result = message.result, select = featureField('station');
   inspectionField('sectionquality').value=result.source==='verified'?'verified':'preview';
-  inspectionVerificationPolicy=result.source==='verified'?inspectionPolicy(result.provenance):null;
+  inspectionVerificationPolicy=result.source==='verified'?policyFromProvenance(result.provenance):null;
+  evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'source',source:inspectionField('sectionquality').value});
   select.replaceChildren(...result.cad.map((cut,index) => new Option(`${cut.name}: ${cut.offset_mm} mm`,String(index))));
   select.hidden = !result.cad.length; featureField('plot').toggleAttribute('hidden',!result.cad.length);
   featureField('status').textContent = result.saved ? 'Inspection recorded; it does not assert physical fit.' : result.cad.length
@@ -2005,6 +2049,8 @@ function featureInspectionLanded(message) {
     ? `Verified contours requested ${result.provenance?.absolute_deflection_mm ?? 'unknown'} mm deflection. Achieved geometric error remains unknown; this does not certify physical fit.`
     : 'Preview exports use the display mesh, whose accuracy in mm is unknown. Run precise verification to inspect and export bounded verification contours.';
   featureField('review').disabled = !!result.saved;
+  evidenceMove({type:result.source==='verified'?'verify-measured':'preview-ready',token:message.token,
+    requestId:result.verification_request_id,policy:policyFromProvenance(result.provenance)});
   featureExportState();
   featurePlot();
 }
@@ -2072,15 +2118,15 @@ featureField('sectionchoice').onchange = event => {
 };
 featureField('sectionadd').onclick = () => {
   try {
-    featureSectionStore(); featureSectionDrafts.push({name:`Profile ${featureSectionDrafts.length+1}`,origin_mm:[0,0,0],normal:[0,0,1],x_direction:[1,0,0],offsets_mm:[0],tolerance_mm:0,expected:''});
-    featureField('sectionenabled').checked=true; featureSectionLoad(featureSectionDrafts.length-1); featureDirty=true; featureInspection=null;
+    featureSectionStore(); featureSeries=sectionSeriesAdd(featureSeries,{name:`Profile ${featureSeries.items.length+1}`,origin_mm:[0,0,0],normal:[0,0,1],x_direction:[1,0,0],offsets_mm:[0],tolerance_mm:0,expected:''});
+    featureField('sectionenabled').checked=true; featureSectionLoad(featureSeries.index); featureDirty=true; featureInspection=null;
     featureField('plot').setAttribute('hidden',''); featureField('station').hidden=true; featureEditorState(parts.get(current));
   } catch (error) { featureField('status').textContent=error.message; }
 };
 featureField('sectionremove').onclick = () => {
-  if (!featureSectionDrafts.length) return;
-  featureSectionDrafts.splice(featureSectionIndex,1); featureField('sectionenabled').checked=!!featureSectionDrafts.length;
-  featureSectionLoad(Math.min(featureSectionIndex,featureSectionDrafts.length-1)); featureDirty=true; featureInspection=null;
+  if (!featureSeries.items.length) return;
+  featureSeries=sectionSeriesRemove(featureSeries); featureField('sectionenabled').checked=!!featureSeries.items.length;
+  featureSectionLoad(featureSeries.index); featureDirty=true; featureInspection=null;
   featureField('plot').setAttribute('hidden',''); featureField('station').hidden=true; featureEditorState(parts.get(current));
 };
 featureField('frameview').onclick = () => {
@@ -2120,9 +2166,7 @@ function verificationShow(entry) {
   if (entry?.target?.verification) verificationHistory.set(entry.name,entry.target.verification);
   const state = entry?.target?.verification || verificationHistory.get(entry?.name), output = document.getElementById('verifyresult');
   const currentState = state && state.token === entry?.token && !entry?.target?.stale;
-  const active = currentState && ['queued','running','cancelling'].includes(state.status);
-  document.getElementById('verifyrun').disabled = active || !entry?.target || !!entry.target.stale;
-  document.getElementById('verifycancel').disabled = !active || !state?.request_id || state.status === 'cancelling';
+  evidenceRender();
   output.replaceChildren();
   const status = document.getElementById('verifystatus');
   if (!state) { status.textContent = 'No precise verification for this build.'; return; }
@@ -2152,11 +2196,21 @@ function verificationLanded(message) {
   const previous=entry.target.verification;
   if (previous?.request_id && message.request_id !== previous.request_id && message.status !== 'queued') return;
   entry.target.verification=message;
-  if (message.name === current) { verificationShow(entry); featureEditorState(entry); }
+  if (message.name === current) {
+    const policy=policyFromProvenance(message.provenance);
+    if (['unknown','stale','cancelled'].includes(message.status)) evidenceMove({type:'verify-failed',requestId:message.request_id,status:message.status,error:message.error || 'Verification produced no result.'});
+    else evidenceMove({type:'verify-progress',requestId:message.request_id,status:message.status,policy});
+    if (message.status==='measured') {
+      const result=featureVerifiedResult(entry);
+      if (result) featureInspectionLanded({name:current,token:entry.token,result});
+    }
+    verificationShow(entry); featureEditorState(entry);
+  }
 }
 document.getElementById('verifycancel').onclick = () => {
   const entry=parts.get(current), state=entry?.target?.verification;
   if (!state?.request_id || !sock || sock.readyState !== WebSocket.OPEN) return;
+  evidenceMove({type:'verify-cancel',requestId:state.request_id});
   sock.send(JSON.stringify({type:'target_verify_cancel',name:current,token:entry.token,request_id:state.request_id}));
 };
 document.getElementById('verifyrun').onclick = () => {
@@ -2168,6 +2222,8 @@ document.getElementById('verifyrun').onclick = () => {
   const entry=parts.get(current);
   if (entry.target.verification?.status==='measured') entry.target.last_verification=entry.target.verification;
   entry.target.verification={status:'queued',phase:'Requesting verification',token:entry.token};
+  evidenceMove({type:'verify-requested',policy:{accuracy_mm:message.accuracy_mm ?? null,timeout_s:message.timeout_s,
+    max_triangles:message.max_triangles,feature_size_mm:message.feature_size_mm ?? null,memory_limit_mb:message.memory_limit_mb}});
   verificationShow(entry); sock.send(JSON.stringify(message));
 };
 
@@ -5149,12 +5205,10 @@ const savedInspectionRows = new Map(), inspectionCalls = new Map();
 let restoringInspection = null, inspectionLoaded = null, inspectionBusy = false;
 let inspectionVerificationPolicy = null;
 const inspectionField = key => document.getElementById('inspection'+key);
-function inspectionPolicy(provenance) {
-  if (!provenance) return null;
-  return {accuracy_mm:provenance.absolute_deflection_mm,timeout_s:provenance.timeout_s,max_triangles:provenance.max_triangles,
-    feature_size_mm:provenance.feature_size_mm ?? null,memory_limit_mb:provenance.memory?.limit_mb};
-}
-inspectionField('sectionquality').onchange=()=>{inspectionVerificationPolicy=null;};
+inspectionField('sectionquality').onchange=()=>{
+  inspectionVerificationPolicy=null;
+  evidenceMove({type:'source',source:inspectionField('sectionquality').value});
+};
 function inspectionRequest(type, fields={}) {
   if (!sock || sock.readyState!==WebSocket.OPEN) return Promise.reject(new Error('Reconnect to save or capture an inspection.'));
   const request_id=crypto.randomUUID();
@@ -5175,7 +5229,7 @@ function captureViewState() {
   const region=inspectionRegionName || selectedFeatureRegion()?.name || null;
   const sectionPosition=cutting && cutSign ? plane.constant/cutSign-(inspectionMode==='section' || cutAxis!=='z'?mesh.position[cutAxis]:0) : cutMm;
   const sectionSource=inspectionField('sectionquality').value;
-  const policy=sectionSource==='verified' ? inspectionVerificationPolicy || inspectionPolicy(target?.verification?.provenance) : null;
+  const policy=sectionSource==='verified' ? inspectionVerificationPolicy || policyFromProvenance(target?.verification?.provenance) : null;
   return {camera:{position_mm:camera.position.clone().sub(mesh.position).toArray(),target_mm:controls.target.clone().sub(mesh.position).toArray(),up:camera.up.toArray(),zoom:camera.zoom,height_mm:camera.top-camera.bottom},
     viewport:[main.clientWidth,main.clientHeight],mode:inspectionMode,hidden_components:[...hiddenComponents].sort(),
     section:{enabled:cutting,axis:cutAxis,position_mm:sectionPosition,fraction:cutAt,sign:cutSign || 1},
@@ -5190,6 +5244,7 @@ function savedInspectionState(entry) {
     inspectionField('status').textContent='The displayed model rebuilt. Refresh the list to check saved evidence; restore a setup or save this new view.';
     inspectionLoaded=null;
     inspectionVerificationPolicy=null;
+    if (entry?.name===current) evidenceMove({type:'rebuild',token:entry.token,freshness:entry.target?.stale?'stale':'current'});
   }
 }
 async function savedInspectionList() {
@@ -5248,6 +5303,8 @@ async function applyInspectionView(item, freshness={status:'current'},sections=n
   inspectionRegionName=state.region; inspectionApply(); componentPanel();
   const region=(entry.target?.regions || []).find(region=>region.name===state.region);
   if (region) { document.getElementById('regionexisting').value=region.name; featureEditorLoad(region); }
+  evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'select',part:current,token:entry.token,interfaceId:region?.feature?.id || null,
+    setupId:item.id,source:state.section_source || 'preview',freshness:freshness.status || 'unknown'});
   if (sections?.cad?.length) {
     featureInspection={name:current,token:entry.token,result:{...sections,preview_only:true}};
     featureField('station').replaceChildren(...sections.cad.map((cut,i)=>new Option(`${cut.name}: ${cut.offset_mm} mm`,String(i))));
@@ -5257,6 +5314,10 @@ async function applyInspectionView(item, freshness={status:'current'},sections=n
       ? 'Saved setup local sections from the current bounded verification mesh.'
       : 'Saved setup local sections from the display mesh preview; capture records current or stale inputs.';
     featureField('review').disabled=true;
+    if (sections.source==='verified') {
+      evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'verify-requested',requestId:sections.verification_request_id,policy:state.verification_policy});
+      evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'verify-measured',token:entry.token,requestId:sections.verification_request_id,policy:state.verification_policy});
+    } else evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'preview-ready',token:entry.token});
   } else {
     const stations=(item.region?.feature?.sections || []).flatMap(section=>section.offsets_mm.map(offset=>`${section.name}: ${offset} mm`));
     featureField('station').replaceChildren(...stations.map((label,i)=>new Option(label,String(i))));
@@ -5271,6 +5332,8 @@ async function applyInspectionView(item, freshness={status:'current'},sections=n
   else symmetryClearPlane();
   sectionDrawingKey=null; sectionDifference(); inspectionRender();
   inspectionLoaded={name:current,token:entry.token,id:item.id};
+  evidenceWorkflow=inspectionTransition(evidenceWorkflow,{type:'saved',setupId:item.id,freshness:freshness.status || 'unknown'});
+  evidenceRender();
   return entry;
 }
 function captureSectionImages(item,sections) {
@@ -5330,6 +5393,8 @@ window.__nurb.captureInspection=captureInspectionImage;
 async function inspectionAction(action) {
   if (inspectionBusy) return;
   inspectionBusy=true;
+  const capturing=action==='capture';
+  if (capturing) evidenceMove({type:'capture-requested'});
   for (const key of ['save','capture','restore','refresh']) inspectionField(key).disabled=true;
   const name=current;
   try {
@@ -5365,6 +5430,7 @@ async function inspectionAction(action) {
       const response=await inspectionRequest('inspection_save',{view,label});
       await savedInspectionList();inspectionField('choice').value=response.setup.id;
       inspectionLoaded={name:current,token:parts.get(current).token,id:response.setup.id};
+      evidenceMove({type:'saved',setupId:response.setup.id,freshness:'current'});
       inspectionField('status').textContent='Inspection setup saved in the project.';return;
     }
     inspectionField('status').textContent='Preparing current source identities and local section evidence…';
@@ -5382,8 +5448,17 @@ async function inspectionAction(action) {
     inspectionField('download').replaceChildren(link);
     if (embed) await window.downloadArtifact({filename:saved.file,path:saved.path});
     await savedInspectionList();inspectionField('choice').value=saved.setup_id;
-  } catch(error) { inspectionField('status').textContent=error.message; }
-  finally { inspectionBusy=false;for(const key of ['save','capture','refresh'])inspectionField(key).disabled=false;inspectionField('restore').disabled=!inspectionField('choice').value; }
+    evidenceMove({type:'capture-complete',setupId:saved.setup_id});
+  } catch(error) {
+    if (capturing) evidenceMove({type:'capture-failed',error:error.message});
+    inspectionField('status').textContent=error.message;
+  }
+  finally {
+    inspectionBusy=false;
+    inspectionField('refresh').disabled=false;
+    inspectionField('restore').disabled=!inspectionField('choice').value;
+    evidenceRender();
+  }
 }
 for (const action of ['save','capture','restore','refresh']) inspectionField(action).onclick=()=>inspectionAction(action);
 inspectionField('choice').onchange=()=>{
@@ -5391,7 +5466,6 @@ inspectionField('choice').onchange=()=>{
   const row=savedInspectionRows.get(current)?.find(item=>item.id===inspectionField('choice').value);
   if(row) {inspectionField('label').value=row.name;inspectionField('status').textContent=`Saved evidence is ${row.freshness.status}${row.freshness.changed.length?': '+row.freshness.changed.join(', '):''}. Restore before capturing this setup.`;}
 };
-document.getElementById('savedinspections').ontoggle=()=>{if(document.getElementById('savedinspections').open && !inspectionBusy)inspectionAction('refresh');};
 
 // ---- socket ----
 

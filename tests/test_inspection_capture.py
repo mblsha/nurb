@@ -319,7 +319,7 @@ def test_embedded_verified_exports_capture_and_cancellation(tmp_path):
             browser=render._launch(pw);page=browser.new_page(viewport={'width':1280,'height':960})
             page.goto(f'http://127.0.0.1:{server.port}/?part=thing&embed')
             page.wait_for_function('window.__nurb?.ready')
-            page.evaluate("for(const id of ['regioneditor','featureeditor','savedinspections','preciseverification'])document.getElementById(id).open=true;window.addEventListener('message',event=>{if(event.data?.type==='nurb:saved')window.savedArtifact=event.data.path;})")
+            page.evaluate("for(const id of ['regioneditor','featureeditor','compareadvanced','preciseverification'])document.getElementById(id).open=true;window.addEventListener('message',event=>{if(event.data?.type==='nurb:saved')window.savedArtifact=event.data.path;})")
             page.locator('#regionexisting').select_option('Rim')
             page.locator('#featureverified').click()
             page.wait_for_function("document.querySelector('#featurestatus').textContent.includes('Verified bounded mesh')")

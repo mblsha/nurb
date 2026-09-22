@@ -86,3 +86,33 @@ def test_a_cut_and_a_computed_view_each_change_the_picture(tmp_path):
 def test_unknown_comparison_mode_is_rejected_before_browser_setup(tmp_path):
     with pytest.raises(BuildError, match="comparison mode.*have:"):
         renderer.render(REAL, [PART], tmp_path, mode="guess")
+
+
+def test_real_viewer_loads_inspection_coordinator_and_primary_flow(tmp_path):
+    pytest.importorskip("playwright", reason="nurb render is an optional extra")
+    from playwright.sync_api import sync_playwright
+    from nurb.server import Server
+
+    server = Server(REAL, port=renderer.free_port(), draft=False)
+    assert not server.rebuild(PART)["error"]
+    done = renderer._host(server)
+    errors = []
+    try:
+        with sync_playwright() as pw:
+            browser = renderer._launch(pw)
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.goto(f"http://127.0.0.1:{server.port}/?part=fit_coupon")
+            page.wait_for_function("window.__nurb && window.__nurb.ready")
+            page.locator("#ghostbtn").click()
+            assert page.locator("#inspectionworkflow").is_visible()
+            assert page.locator("#inspectionworkflow .evidencestep > b").all_inner_texts() == [
+                "1 · Select", "2 · Inspect sections", "3 · Verify", "4 · Save or capture",
+            ]
+            assert not page.locator("#compareadvanced").get_attribute("open")
+            assert any(entry.endswith("/inspection-state.js") for entry in page.evaluate("performance.getEntriesByType('resource').map(entry=>entry.name)"))
+            page.screenshot(path=str(tmp_path / "inspection-primary-flow.png"))
+            browser.close()
+    finally:
+        done.set()
+    assert not errors
