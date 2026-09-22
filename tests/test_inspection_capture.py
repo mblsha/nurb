@@ -56,6 +56,16 @@ def test_saved_setup_roundtrip_keeps_semantic_sections_and_does_not_expire_itsel
     assert inspection.sections(server,entry,saved)['cad'][0]['offset_mm']==-1
 
 
+def test_source_revision_excludes_declared_validator_outputs_but_tracks_analytic_json(tmp_path):
+    part,_,_=project(tmp_path)
+    before=symmetry.source_revision(part)
+    references=tmp_path/'references';references.mkdir()
+    report=references/'current-validation.json';report.write_text(json.dumps({'kind':'nurb_validator_evidence','status':'current'})+'\n')
+    assert symmetry.source_revision(part)==before
+    (references/'section-input.json').write_text(json.dumps({'stations_mm':[-1,0,1]})+'\n')
+    assert symmetry.source_revision(part)!=before
+
+
 @pytest.mark.parametrize('change',['geometry','source','reference','configuration','alignment','tolerance','feature'])
 def test_input_changes_are_explicitly_stale(tmp_path,change):
     part,server,_=project(tmp_path);entry=server.state['thing']

@@ -368,7 +368,7 @@ def source_revision(part):
         if path.is_file() and path.suffix.lower() in (".py", ".md", ".toml", ".json", ".step", ".stp", ".brep"):
             if path.suffix.lower() == ".json":
                 try:
-                    if json.loads(path.read_text()).get("kind") in ("symmetry_evidence", "local-section-evidence"):
+                    if json.loads(path.read_text()).get("kind") in ("symmetry_evidence", "local-section-evidence", "nurb_validator_evidence"):
                         continue
                 except (ValueError, AttributeError, UnicodeError):
                     pass
