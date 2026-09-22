@@ -83,6 +83,15 @@ def test_an_exhausted_walk_falls_back_to_an_ephemeral_port(monkeypatch, tmp_path
     assert port > 0
 
 
+def test_an_auto_port_walk_near_the_limit_never_probes_an_invalid_port(monkeypatch, tmp_path):
+    probed = []
+    monkeypatch.setattr(cli, "DEFAULT_PORT", 65530)
+    monkeypatch.setattr(cli, "_is_free", lambda port: probed.append(port) or False)
+    monkeypatch.setattr(cli, "_serving", lambda port, root: None)
+    assert cli._pick_port(None, tmp_path) > 0
+    assert probed == list(range(65530, 65536))
+
+
 def test_asking_for_a_busy_port_is_an_error_not_a_suggestion(tmp_path):
     """`--port 7373` picking 7374 would open a tab onto somebody else's parts."""
     import socket

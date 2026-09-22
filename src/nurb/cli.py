@@ -1705,7 +1705,7 @@ def _pick_port(asked, root):
             f"  leave --port off and one will be picked for you"
         )
     free = None
-    for port in range(DEFAULT_PORT, DEFAULT_PORT + 40):
+    for port in range(DEFAULT_PORT, min(DEFAULT_PORT + 40, 65536)):
         if _is_free(port):
             if free is None:
                 free = port
