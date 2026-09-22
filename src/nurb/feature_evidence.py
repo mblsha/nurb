@@ -198,9 +198,13 @@ def shape_identity(shape):
 
 def portable_shape_identity(shape):
     """Fingerprint built geometry without OCCT serialization or tessellation order."""
-    def number(value):
-        value = round(float(value), 7)
-        return 0.0 if value == 0 else value
+    # OCCT's derived B-spline measures can differ by a few last-place digits across
+    # platforms. A portable identity should ignore that numerical noise while still
+    # expiring for changes far below normal manufacturing tolerances.
+    resolution = {"linear_mm": 0.001, "area_mm2": 0.01, "volume_mm3": 0.1}
+
+    def number(value, unit="linear_mm"):
+        return round(float(value) / resolution[unit])
 
     def point(value):
         return [number(value.X), number(value.Y), number(value.Z)]
@@ -209,10 +213,10 @@ def portable_shape_identity(shape):
         box = value.bounding_box()
         return [point(box.min), point(box.max)]
 
-    def record(value, measure):
+    def record(value, measure, unit):
         return {
             "type": str(value.geom_type),
-            measure: number(getattr(value, measure)),
+            measure: number(getattr(value, measure), unit),
             "center": point(value.center()),
             "bounds": bounds(value),
         }
@@ -220,23 +224,24 @@ def portable_shape_identity(shape):
     vertices = sorted(point(vertex.center()) for vertex in shape.vertices())
     edges = []
     for edge in shape.edges():
-        item = record(edge, "length")
+        item = record(edge, "length", "linear_mm")
         item.pop("bounds")
         item["vertices"] = sorted(point(vertex.center()) for vertex in edge.vertices())
         item["samples"] = sorted(point(edge.position_at(fraction)) for fraction in (0.0, 0.25, 0.5, 0.75, 1.0))
         edges.append(item)
     faces = []
     for face in shape.faces():
-        item = record(face, "area")
-        item["edges"] = sorted(number(edge.length) for edge in face.edges())
+        item = record(face, "area", "area_mm2")
+        item["edges"] = sorted(number(edge.length, "linear_mm") for edge in face.edges())
         faces.append(item)
     solids = []
     for solid in shape.solids():
-        item = record(solid, "volume")
-        item["area"] = number(solid.area)
+        item = record(solid, "volume", "volume_mm3")
+        item["area"] = number(solid.area, "area_mm2")
         item["faces"] = len(solid.faces())
         solids.append(item)
     document = {
+        "resolution": resolution,
         "bounds": bounds(shape),
         "vertices": vertices,
         "edges": sorted(edges, key=lambda value: json.dumps(value, sort_keys=True)),

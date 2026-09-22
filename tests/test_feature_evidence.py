@@ -93,13 +93,15 @@ def test_exact_geometry_identity_ignores_display_meshing_but_changes_for_holes()
     assert evidence.shape_identity(shape - Cylinder(1, 10)) != first
 
 
-def test_portable_geometry_identity_tracks_topology_and_placement_without_display_meshes():
+def test_portable_geometry_identity_tracks_small_geometry_and_placement_changes_without_display_meshes():
     shape = Box(10, 10, 6)
     first = evidence.portable_shape_identity(shape)
     builder.to_mesh(shape, 0.05)
     assert evidence.portable_shape_identity(shape) == first
     assert evidence.portable_shape_identity(shape - Cylinder(1, 10)) != first
-    assert evidence.portable_shape_identity(Location((1, 0, 0)) * shape) != first
+    assert evidence.portable_shape_identity(Box(10.01, 10, 6)) != first
+    assert evidence.portable_shape_identity(Location((0.01, 0, 0)) * shape) != first
+    assert evidence.portable_shape_identity(Cylinder(5, 10)) != evidence.portable_shape_identity(Cylinder(5.01, 10))
 
 
 @pytest.mark.parametrize("change", ["geometry", "reference", "alignment", "configuration", "role", "selection", "feature_size", "remove_size", "center", "symmetry_group"])
