@@ -172,7 +172,7 @@ def identity(server, path, entry, state):
     region=next((r for r in target.get('regions',[]) if r['name']==state['region']),None)
     if state['region'] and not region:
         raise ValueError('the selected inspection region is missing; choose a current region')
-    fields={'geometry':feature_evidence.shape_identity(entry['shape']), 'source_revision':symmetry.source_revision(path),
+    fields={'geometry':feature_evidence.portable_shape_identity(entry['shape']), 'source_revision':symmetry.source_revision(path),
             'reference':reference, 'configuration':configuration(entry), 'alignment':state['alignment'],
             'tolerance_mm':state['tolerance_mm'], 'region':region, 'draft':bool(server.draft)}
     fields['token']=hashlib.sha256(json.dumps(fields,sort_keys=True,allow_nan=False).encode()).hexdigest()
